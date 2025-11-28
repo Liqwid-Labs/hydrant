@@ -47,7 +47,12 @@
                 filename: "${pkgs.curl}/bin/curl -L -s -o db/node/${filename} ${githubRawUrl}/${filename}"
               ) configFiles
             }
-            ${node}/bin/cardano-node run --database-path db/node/data --socket-path db/node/socket --config db/node/mainnet-config.yaml --topology ./db/node/mainnet-topology.json
+            ${node}/bin/cardano-node run \
+              --database-path db/node/data \
+              --config db/node/mainnet-config.yaml \
+              --topology ./db/node/mainnet-topology.json \
+              --host-addr 127.0.0.1 \
+              --port 3001
           '';
           clearNode = pkgs.writeShellScriptBin "clear-node" ''
             set -euo pipefail

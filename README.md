@@ -10,7 +10,7 @@
 
 ## Development
 
-This project depends on a local cardano-node to use the Node-to-Client (N2C) protocol for chain-sync. If `nix develop` takes a long time to build, ensure that you have accepted the flake config such that the IOG cache will be used for downloading `cardano-node`.
+This project uses the Node-to-Node (N2N) protocol for chainsync and blockfetch, such that you don't need a local node, just a relay. But for the purposes of development, we use a local node to speed-up sync times. If `nix develop` takes a long time to build, ensure that you have accepted the flake config such that the IOG cache will be used for downloading `cardano-node`.
 
 Currently, the cardano-node runs against mainnet (please feel free to PR supporting preview) which uses ~250GBs of disk space and ~12GB of RAM.
 
