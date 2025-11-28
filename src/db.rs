@@ -42,8 +42,7 @@ impl Db {
     }
 
     fn set_tip(&self, tip: &Point) -> Result<()> {
-        // actual length is 38 bytes (2 byte cbor header, 8 byte slot, 28 byte hash)
-        let mut buffer = [0u8; 64];
+        let mut buffer = [0u8; 40];
         minicbor::encode(tip, buffer.as_mut()).expect("failed to encode tip");
         self.state.insert("tip", buffer)?;
         Ok(())

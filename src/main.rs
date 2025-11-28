@@ -9,6 +9,8 @@ use tokio::sync::mpsc;
 mod db;
 mod tx;
 use db::Db;
+use tracing::Level;
+use tracing_subscriber::FmtSubscriber;
 
 const BUFFER_SIZE: usize = 10000;
 const NODE_SOCKET: &str = "./db/node/socket";
@@ -25,20 +27,27 @@ enum ProcessorEvent {
     Shutdown,
 }
 
+// TODO: safe shutdown on error
 #[tokio::main]
 async fn main() -> Result<()> {
-    // TODO: safe shutdown on error
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(Level::INFO)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+
     let db = Db::new("./db/hydrant")?;
 
+    tracing::info!("Connecting to node...");
     let mut peer = NodeClient::connect(NODE_SOCKET, MAGIC).await?;
     let client = peer.chainsync();
     if let Ok(Some(tip)) = db.tip() {
-        println!("tip is {:?}, requesting intersection", tip);
+        tracing::info!(?tip, "Requesting intersection");
         client.find_intersect(vec![tip]).await?;
     } else {
-        println!("no tip, starting from origin");
+        tracing::info!("No tip, starting from origin");
         client.intersect_origin().await?;
     }
+    tracing::info!("Connected to node");
 
     // Process new blocks in a background task
     let (tx, mut rx) = mpsc::channel::<ProcessorEvent>(BUFFER_SIZE);
@@ -48,9 +57,9 @@ async fn main() -> Result<()> {
             if matches!(response, ProcessorEvent::Shutdown) {
                 return Ok(());
             }
-            if let Err(e) = process_event(response, &processor_db) {
-                eprintln!("Error processing response: {}", e);
-                return Err(e);
+            if let Err(error) = process_event(response, &processor_db) {
+                tracing::error!(?error, "error processing chain-sync response");
+                return Err(error);
             }
         }
         Ok(())
@@ -60,6 +69,12 @@ async fn main() -> Result<()> {
         // Fetch blocks from node
         result = async {
             loop {
+                if processor_task.is_finished() {
+                    tracing::error!("Processor task exited early, persisting database and exiting...");
+                    db.persist()?;
+                    return Ok(());
+                }
+
                 let next = match client.has_agency() {
                     true => client.request_next().await?,
                     false => client.recv_while_must_reply().await?,
@@ -76,9 +91,10 @@ async fn main() -> Result<()> {
 
         // Shutdown
         _ = shutdown_signal() => {
-            println!("Received shutdown signal, stopping processor and persisting database...");
+            tracing::info!("Received shutdown signal, flushing processor...");
             tx.send(ProcessorEvent::Shutdown).await?;
             let _ = processor_task.await;
+            tracing::info!("Persisting database...");
             db.persist()?;
             Ok(())
         }
@@ -91,14 +107,9 @@ fn process_event(event: ProcessorEvent, db: &Db) -> Result<()> {
             let block = MultiEraBlock::decode(&cbor)?;
             db.roll_forward(&block)?;
 
-            if tip.0.slot_or_default() < block.slot().saturating_sub(1000)
-                || block.number() % 500 == 0
-            {
-                println!(
-                    "RollForward: slot {} | block {}",
-                    block.slot(),
-                    block.number(),
-                );
+            let tip_slot = tip.0.slot_or_default();
+            if tip_slot < block.slot().saturating_sub(1000) || block.number() % 1000 == 0 {
+                tracing::info!(slot = block.slot(), number = block.number(), "RollForward");
             }
 
             Ok(())
@@ -106,8 +117,8 @@ fn process_event(event: ProcessorEvent, db: &Db) -> Result<()> {
         ProcessorEvent::RollBackward(point) => {
             db.roll_backward(&point)?;
             match &point {
-                Point::Origin => println!("RollBackward: to origin"),
-                Point::Specific(slot, _) => println!("RollBackward: slot {}", slot),
+                Point::Origin => tracing::info!(slot = 0, origin = true, "RollBackward"),
+                Point::Specific(slot, _) => tracing::info!(?slot, origin = false, "RollBackward"),
             };
             Ok(())
         }
