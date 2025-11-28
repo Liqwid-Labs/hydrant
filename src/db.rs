@@ -79,6 +79,14 @@ impl Db {
 
         let blocks = self.slots.range(slot..);
         for (slot, block) in blocks.flatten() {
+            if let Some(txs) = self.blocks.get(&block)? {
+                let (tx_hashes, _): (Vec<[u8; 32]>, usize) =
+                    bincode::decode_from_slice(&txs, CONFIG).expect("failed to decode txs");
+                for tx_hash in tx_hashes.iter() {
+                    self.txs.remove(tx_hash)?;
+                }
+            }
+
             self.slots.remove(slot)?;
             self.blocks.remove(block)?;
         }
