@@ -23,7 +23,7 @@ pub struct Db {
 impl Db {
     pub fn new(path: &str) -> Result<Self> {
         info!("Creating/opening database...");
-        let keyspace = Config::new(path).open()?;
+        let keyspace = Config::new(path).fsync_ms(Some(1000)).open()?;
 
         let state = keyspace.open_partition("state", PartitionCreateOptions::default())?;
         let slots = keyspace.open_partition("slots", PartitionCreateOptions::default())?;
