@@ -69,4 +69,3 @@ impl Sync {
         self.node.abort().await
     }
 }
-

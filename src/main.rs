@@ -41,8 +41,8 @@ async fn main() -> Result<()> {
     sync.stop().await;
 
     info!("Stopping writer...");
-    if let Err(writer_error) = writer.stop().await {
-        error!(?writer_error);
+    if let Err(error) = writer.stop().await {
+        error!(?error);
     }
 
     info!("Persisting database...");

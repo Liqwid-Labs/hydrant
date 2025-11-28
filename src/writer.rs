@@ -10,34 +10,49 @@ const BUFFER_SIZE: usize = 5000;
 
 pub struct Writer {
     tx: mpsc::Sender<SyncEvent>,
+    shutdown_tx: mpsc::Sender<()>,
     task: tokio::task::JoinHandle<Result<()>>,
 }
 
 impl Writer {
     pub fn new(db: &Db, filter: Box<Filter>) -> Self {
         let (tx, mut rx) = mpsc::channel::<SyncEvent>(BUFFER_SIZE);
+        let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
         let db = db.clone();
         let task = tokio::spawn(async move {
-            while let Some(event) = rx.recv().await {
-                let buffer_usage = (BUFFER_SIZE - rx.capacity()) as f64 / BUFFER_SIZE as f64 * 100.;
-                Writer::write_event(event, &db, &filter, buffer_usage)?;
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.recv() => {
+                        break;
+                    }
+                    Some(event) = rx.recv() => {
+                        let buffer_usage = (BUFFER_SIZE - rx.capacity()) as f64 / BUFFER_SIZE as f64 * 100.;
+                        Writer::write_event(event, &db, &filter, buffer_usage)?;
+                    }
+                    else => break,
+                }
             }
             Ok(())
         });
-        Self { tx, task }
+        Self {
+            tx,
+            shutdown_tx,
+            task,
+        }
     }
 
     pub async fn send(&self, event: SyncEvent) -> Result<()> {
-        if self.task.is_finished() {
-            return Err(anyhow::anyhow!("Writer channel closed"));
-        }
         self.tx.send(event).await.context("Writer channel closed")?;
         Ok(())
     }
 
     pub async fn stop(self) -> Result<()> {
         drop(self.tx);
+        self.shutdown_tx
+            .send(())
+            .await
+            .context("attempted to stop writer which has already been stopped")?;
         self.task.await?
     }
 
