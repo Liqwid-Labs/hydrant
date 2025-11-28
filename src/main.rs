@@ -1,27 +1,16 @@
 use anyhow::Result;
-use pallas::ledger::traverse::MultiEraBlock;
-use pallas::network::facades::NodeClient;
-use pallas::network::miniprotocols::chainsync::{BlockContent, NextResponse, Tip};
-use pallas::network::miniprotocols::{Point, chainsync};
 use tokio::signal;
-use tokio::sync::mpsc;
-use tracing::Level;
+use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 
 mod db;
+mod sync;
 mod tx;
+mod writer;
 use db::Db;
 
-const BUFFER_SIZE: usize = 10000;
-const NODE_SOCKET: &str = "./db/node/socket";
-const MAGIC: u64 = 764824073; // mainnet
-
-enum ProcessorEvent {
-    /// Rolled forward to a new block
-    RollForward(BlockContent, Tip),
-    /// Rolled back to a point in the chain
-    RollBackward(Point),
-}
+use crate::sync::Sync;
+use crate::writer::Writer;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -29,114 +18,37 @@ async fn main() -> Result<()> {
         .with_max_level(Level::INFO)
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "Starting...");
 
     let db = Db::new("./db/hydrant")?;
-    let peer = setup_node_connection(&db).await?;
-    let result = run_sync_loop(peer, db.clone()).await;
-
-    tracing::info!("Persisting database...");
-    db.persist()?;
-
-    result
-}
-
-async fn setup_node_connection(db: &Db) -> Result<NodeClient> {
-    tracing::info!("Connecting to node...");
-    let mut peer = NodeClient::connect(NODE_SOCKET, MAGIC).await?;
-    let client = peer.chainsync();
-
-    if let Ok(Some(tip)) = db.tip() {
-        tracing::info!(?tip, "Requesting intersection");
-        client.find_intersect(vec![tip]).await?;
-    } else {
-        tracing::info!("No tip, starting from origin");
-        client.intersect_origin().await?;
-    }
-
-    tracing::info!("Connected to node");
-    Ok(peer)
-}
-
-async fn run_sync_loop(mut peer: NodeClient, db: Db) -> Result<()> {
-    let (tx, mut rx) = mpsc::channel::<ProcessorEvent>(BUFFER_SIZE);
-
-    // Push blocks to database on a background task
-    let processor = tokio::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            if let Err(error) = process_event(event, &db) {
-                tracing::error!(?error, "error processing chain-sync response");
-                return Err(error);
-            }
-        }
-        Ok(())
-    });
+    let writer = Writer::new(&db, Box::new(|_, _, _, _| true));
+    let mut sync = Sync::new(&db).await?;
 
     // Listen for chain-sync events until shutdown or error
+    info!("Starting sync...");
     let sync_result = tokio::select! {
-        res = fetch_chainsync_event(peer.chainsync(), tx.clone()) => res,
+        res = sync.next(&writer) => res,
         _ = shutdown_signal() => {
-            tracing::info!("Received shutdown signal, flushing processor...");
+            tracing::info!("Received shutdown signal");
             Ok(())
         }
     };
-
-    // Stop sending new events and wait for processor to drain
-    drop(tx);
-    let _ = processor.await?; // TODO: handle error
-
-    sync_result
-}
-
-async fn fetch_chainsync_event(
-    client: &mut chainsync::N2CClient,
-    tx: mpsc::Sender<ProcessorEvent>,
-) -> Result<()> {
-    loop {
-        let next = match client.has_agency() {
-            true => client.request_next().await?,
-            false => client.recv_while_must_reply().await?,
-        };
-
-        let event = match next {
-            NextResponse::RollForward(cbor, tip) => ProcessorEvent::RollForward(cbor, tip),
-            NextResponse::RollBackward(point, _) => ProcessorEvent::RollBackward(point),
-            NextResponse::Await => continue,
-        };
-
-        // If send fails, receiver has been dropped, so we should stop
-        if tx.send(event).await.is_err() {
-            return Ok(());
-        }
+    if let Err(error) = sync_result {
+        error!(?error);
     }
-}
 
-fn process_event(event: ProcessorEvent, db: &Db) -> Result<()> {
-    match event {
-        ProcessorEvent::RollForward(cbor, tip) => {
-            let block = MultiEraBlock::decode(&cbor)?;
-            db.roll_forward(&block)?;
+    info!("Stopping sync...");
+    sync.stop().await;
 
-            let tip_slot = tip.0.slot_or_default();
-            if tip_slot.saturating_sub(1000) < block.slot() || block.number() % 1000 == 0 {
-                tracing::info!(
-                    slot = block.slot(),
-                    block = block.number(),
-                    ?tip_slot,
-                    "RollForward"
-                );
-            }
-
-            Ok(())
-        }
-        ProcessorEvent::RollBackward(point) => {
-            db.roll_backward(&point)?;
-            match &point {
-                Point::Origin => tracing::info!(slot = 0, origin = true, "RollBackward"),
-                Point::Specific(slot, _) => tracing::info!(?slot, origin = false, "RollBackward"),
-            };
-            Ok(())
-        }
+    info!("Stopping writer...");
+    if let Err(writer_error) = writer.stop().await {
+        error!(?writer_error);
     }
+
+    info!("Persisting database...");
+    db.persist()?;
+
+    Ok(())
 }
 
 async fn shutdown_signal() {

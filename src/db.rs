@@ -1,10 +1,13 @@
 use bincode::config::{BigEndian, Configuration};
 use fjall::{Config, Keyspace, PartitionCreateOptions, PartitionHandle, Result};
 use pallas::codec::minicbor;
-use pallas::ledger::traverse::MultiEraBlock;
+use pallas::ledger::traverse::{MultiEraBlock, MultiEraTx};
 use pallas::network::miniprotocols::Point;
+use tracing::info;
 
 use crate::tx::Tx;
+
+pub type Filter = dyn Fn(&Tx, &MultiEraTx, &MultiEraBlock, &Db) -> bool + Send + Sync;
 
 static CONFIG: Configuration<BigEndian> = bincode::config::standard().with_big_endian();
 
@@ -19,7 +22,8 @@ pub struct Db {
 
 impl Db {
     pub fn new(path: &str) -> Result<Self> {
-        let keyspace = Config::new(path).fsync_ms(Some(1000)).open()?;
+        info!("Creating/opening database...");
+        let keyspace = Config::new(path).open()?;
 
         let state = keyspace.open_partition("state", PartitionCreateOptions::default())?;
         let slots = keyspace.open_partition("slots", PartitionCreateOptions::default())?;
@@ -48,12 +52,19 @@ impl Db {
         Ok(())
     }
 
-    pub fn roll_forward(&self, block: &MultiEraBlock) -> Result<()> {
+    pub fn roll_forward(&self, block: &MultiEraBlock, filter: &Filter) -> Result<()> {
+        // What if we're interrupted?
+        let txs = block.txs();
+        let txs = txs
+            .iter()
+            .map(|tx| (Tx::from(tx), tx))
+            .filter(move |(tx, raw_tx)| filter(tx, raw_tx, block, self));
+
         let mut tx_hashes = vec![];
-        for tx in block.txs() {
-            let hash: [u8; 32] = *tx.hash();
+        for (tx, raw_tx) in txs {
+            let hash: [u8; 32] = *raw_tx.hash();
             tx_hashes.push(hash);
-            let tx = bincode::encode_to_vec(Tx::from(tx), CONFIG).expect("failed to encode tx");
+            let tx = bincode::encode_to_vec(tx, CONFIG).expect("failed to encode tx");
             self.txs.insert(hash, tx)?;
         }
 

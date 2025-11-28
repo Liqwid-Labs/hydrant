@@ -5,6 +5,7 @@ use pallas::ledger::traverse::{MultiEraInput, MultiEraOutput, MultiEraPolicyAsse
 
 #[derive(Clone, Debug, Encode, Decode)]
 pub struct Tx {
+    pub hash: Hash<32>,
     pub inputs: Vec<TxOutputPointer>,
     pub outputs: Vec<TxOutput>,
 
@@ -15,8 +16,8 @@ pub struct Tx {
     pub valid: bool,
 }
 
-impl From<MultiEraTx<'_>> for Tx {
-    fn from(tx: MultiEraTx) -> Self {
+impl From<&MultiEraTx<'_>> for Tx {
+    fn from(tx: &MultiEraTx) -> Self {
         let inputs = tx.inputs().into_iter().map(Into::into).collect();
         let outputs = tx.outputs().into_iter().map(Into::into).collect();
         let collateral = tx.collateral().into_iter().map(Into::into).collect();
@@ -24,6 +25,7 @@ impl From<MultiEraTx<'_>> for Tx {
         let mints = Mint::from_assets(tx.mints());
 
         Self {
+            hash: tx.hash().into(),
             inputs,
             outputs,
             collateral,
