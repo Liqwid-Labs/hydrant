@@ -49,10 +49,9 @@ impl Writer {
 
     pub async fn stop(self) -> Result<()> {
         drop(self.tx);
-        self.shutdown_tx
-            .send(())
-            .await
-            .context("attempted to stop writer which has already been stopped")?;
+        if let Err(e) = self.shutdown_tx.send(()).await {
+            tracing::error!(error = ?e, "error while sending shutdown signal to writer");
+        }
         self.task.await?
     }
 
