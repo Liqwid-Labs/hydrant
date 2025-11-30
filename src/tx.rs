@@ -1,16 +1,16 @@
 use std::ops::Deref;
 
-use bincode::{Decode, Encode};
 use pallas::ledger::primitives::conway::PseudoDatumOption;
 use pallas::ledger::traverse::{
     ComputeHash, MultiEraBlock, MultiEraInput, MultiEraOutput, MultiEraPolicyAssets, MultiEraTx,
 };
+use rkyv::{Archive, Deserialize, Serialize};
 
 // Block
 
 pub type BlockHash = Hash<32>;
 
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Archive, Deserialize, Serialize)]
 pub struct Block {
     pub hash: BlockHash,
     pub number: u64,
@@ -35,13 +35,14 @@ impl Block {
 
 pub type TxHash = Hash<32>;
 
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Archive, Deserialize, Serialize)]
 pub struct Tx {
     pub hash: TxHash,
     pub inputs: Vec<TxOutputPointer>,
     pub outputs: Vec<TxOutput>,
 
     pub collateral: Vec<TxOutputPointer>,
+    pub collateral_return: Option<TxOutput>,
     pub reference_inputs: Vec<TxOutputPointer>,
     // pub scripts: Option<Vec<Script>>,
     pub mints: Vec<Mint>,
@@ -51,9 +52,18 @@ pub struct Tx {
 impl Tx {
     pub fn parse(tx: &MultiEraTx) -> (Self, Vec<(DatumHash, Datum)>) {
         let inputs = tx.inputs_sorted_set().into_iter().map(Into::into).collect();
-        let (outputs, datums): (Vec<TxOutput>, Vec<Option<(DatumHash, Datum)>>) =
+        let (outputs, mut datums): (Vec<TxOutput>, Vec<Option<(DatumHash, Datum)>>) =
             tx.outputs().into_iter().map(|x| TxOutput::parse(x)).unzip();
+
         let collateral = tx.collateral().into_iter().map(Into::into).collect();
+        let collateral_return = tx.collateral_return().map(|cr| {
+            let (collateral_return, datum) = TxOutput::parse(cr);
+            if !tx.is_valid() {
+                datums.push(datum);
+            }
+            collateral_return
+        });
+
         let reference_inputs = tx.reference_inputs().into_iter().map(Into::into).collect();
         let mints = Mint::from_assets(tx.mints_sorted_set());
 
@@ -63,6 +73,7 @@ impl Tx {
                 inputs,
                 outputs,
                 collateral,
+                collateral_return,
                 reference_inputs,
                 mints,
                 valid: tx.is_valid(),
@@ -90,7 +101,7 @@ pub type Datum = Vec<u8>;
 pub type DatumHash = Hash<32>;
 pub type Address = Vec<u8>;
 
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Archive, Deserialize, Serialize)]
 pub struct TxOutput {
     pub address: Address,
     pub lovelace: u64,
@@ -130,36 +141,27 @@ impl TxOutput {
     }
 }
 
-// Unspent Tx Output
-#[derive(Clone, Debug, Encode, Decode)]
-pub struct UnspentTxOutput {
-    /// Hash of the transaction
-    pub hash: TxHash,
-    /// Index of the output in the transaction
-    pub index: u64,
-    pub address: Vec<u8>,
-    pub lovelace: u64,
-    pub assets: Vec<Asset>,
-    pub datum_hash: Option<DatumHash>,
-}
-impl UnspentTxOutput {
-    pub fn new(pointer: &TxOutputPointer, output: &TxOutput) -> Self {
-        let pointer = pointer.clone();
-        let output = output.clone();
-        Self {
-            hash: pointer.hash,
-            index: pointer.index,
-            address: output.address,
-            lovelace: output.lovelace,
-            assets: output.assets,
-            datum_hash: output.datum_hash,
-        }
+// UTxO Guard
+#[derive(Clone, Debug, Archive, Deserialize, Serialize)]
+pub struct UTxOGuard<T>(T, bool)
+where
+    T: Clone + std::fmt::Debug + Archive;
+
+impl<T> UTxOGuard<T>
+where
+    T: Clone + std::fmt::Debug + Archive,
+{
+    pub fn utxo(value: T) -> Self {
+        Self(value, true)
+    }
+    pub fn stxo(value: T) -> Self {
+        Self(value, false)
     }
 }
 
 // Tx Pointer (input)
 
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Archive, Deserialize, Serialize)]
 pub struct TxOutputPointer {
     pub hash: TxHash,
     pub index: u64,
@@ -182,7 +184,7 @@ impl From<MultiEraInput<'_>> for TxOutputPointer {
 
 // Hash
 
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Archive, Deserialize, Serialize)]
 pub struct Hash<const BYTES: usize>([u8; BYTES]);
 impl<const BYTES: usize> From<[u8; BYTES]> for Hash<BYTES> {
     fn from(bytes: [u8; BYTES]) -> Self {
@@ -212,7 +214,10 @@ impl<const BYTES: usize> Deref for Hash<BYTES> {
 pub type Policy = Hash<28>;
 pub type AssetName = Vec<u8>;
 
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Archive, Deserialize, Serialize)]
+pub struct AssetPointer(pub Policy, pub AssetName);
+
+#[derive(Clone, Debug, Archive, Deserialize, Serialize)]
 pub struct Mint {
     pub policy: Policy,
     pub name: AssetName,
@@ -235,7 +240,7 @@ impl Mint {
     }
 }
 
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Archive, Deserialize, Serialize)]
 pub struct Asset {
     pub policy: Policy,
     pub name: AssetName,

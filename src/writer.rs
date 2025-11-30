@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use crate::db::Db;
 use crate::sync::SyncEvent;
 
-const BUFFER_SIZE: usize = 5000;
+const BUFFER_SIZE: usize = 500;
 
 pub struct Writer {
     tx: mpsc::Sender<SyncEvent>,
@@ -62,7 +62,9 @@ impl Writer {
                 db.roll_forward(&block)?;
 
                 let tip_slot = tip.0.slot_or_default();
-                if tip_slot.saturating_sub(1000) < block.slot() || block.number() % 1000 == 0 {
+                let at_tip = tip_slot.saturating_sub(1000) < block.slot();
+                if at_tip || block.number() % 10000 == 0 {
+                    db.persist()?;
                     let sync_progress = block.slot() as f64 / tip_slot as f64 * 100.;
                     tracing::info!(
                         block = block.number(),

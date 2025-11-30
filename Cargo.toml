@@ -19,3 +19,5 @@ fjall = "2.11.2"
 
 # cardano
 pallas = { version = "0.33", features = ["hardano"] }
+heed = "0.22.0"
+rkyv = { version = "0.8.12" }

@@ -33,7 +33,7 @@ impl Sync {
             .context("failed to connect to node")?;
 
         let chainsync = node.chainsync();
-        if let Ok(Some(tip)) = db.tip() {
+        if let Some(tip) = db.tip()? {
             info!(?tip, "Requesting intersection");
             chainsync
                 .find_intersect(vec![tip])

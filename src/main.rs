@@ -3,6 +3,7 @@ use tokio::signal;
 use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 
+mod codec;
 mod db;
 mod sync;
 mod tx;
@@ -21,7 +22,6 @@ async fn main() -> Result<()> {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "Starting...");
 
     let db = Db::new("./db/hydrant")?;
-
     let writer = Writer::new(&db);
     let mut sync = Sync::new(&db).await?;
 
@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
         }
     };
     if let Err(error) = sync_result {
-        error!(?error);
+        error!(?error, "Error while syncing");
     }
 
     info!("Stopping sync...");
@@ -43,7 +43,7 @@ async fn main() -> Result<()> {
 
     info!("Stopping writer...");
     if let Err(error) = writer.stop().await {
-        error!(?error);
+        error!(?error, "Error while writing");
     }
 
     info!("Persisting database...");
