@@ -7,6 +7,7 @@ use fjall::{Batch, PartitionHandle};
 
 static CONFIG: Configuration<BigEndian> = bincode::config::standard().with_big_endian();
 
+/// Type safe wrapper around `fjall::PartitionHandle`
 #[derive(Clone)]
 pub struct Partition<K: Encode + Decode<()>, V: Encode + Decode<()>> {
     _phantom: std::marker::PhantomData<(K, V)>,
@@ -15,7 +16,6 @@ pub struct Partition<K: Encode + Decode<()>, V: Encode + Decode<()>> {
 
 impl<K: Encode + Decode<()>, V: Encode + Decode<()>> Partition<K, V> {
     // Serialization
-
     pub fn encode_key(&self, key: &K) -> Result<Vec<u8>> {
         bincode::encode_to_vec(key, CONFIG)
             .with_context(|| format!("failed to encode {} key", self.partition.name))

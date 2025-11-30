@@ -70,6 +70,18 @@ impl Tx {
             datums.into_iter().flatten().collect(),
         )
     }
+
+    pub fn spent(&self) -> impl Iterator<Item = &TxOutputPointer> + '_ {
+        if self.valid {
+            self.inputs.iter()
+        } else {
+            self.collateral.iter()
+        }
+    }
+
+    pub fn unspent(&self) -> impl Iterator<Item = &TxOutput> + '_ {
+        self.outputs.iter().filter(|_| self.valid)
+    }
 }
 
 // Tx Output

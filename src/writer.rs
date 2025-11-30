@@ -3,7 +3,7 @@ use pallas::ledger::traverse::MultiEraBlock;
 use pallas::network::miniprotocols::Point;
 use tokio::sync::mpsc;
 
-use crate::db::{Db, Filter};
+use crate::db::Db;
 use crate::sync::SyncEvent;
 
 const BUFFER_SIZE: usize = 5000;
@@ -15,7 +15,7 @@ pub struct Writer {
 }
 
 impl Writer {
-    pub fn new(db: &Db, filter: Box<Filter>) -> Self {
+    pub fn new(db: &Db) -> Self {
         let (tx, mut rx) = mpsc::channel::<SyncEvent>(BUFFER_SIZE);
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
@@ -28,7 +28,7 @@ impl Writer {
                     }
                     Some(event) = rx.recv() => {
                         let buffer_usage = (BUFFER_SIZE - rx.capacity()) as f64 / BUFFER_SIZE as f64 * 100.;
-                        Writer::write_event(event, &db, &filter, buffer_usage)?;
+                        Writer::write_event(event, &db, buffer_usage)?;
                     }
                     else => break,
                 }
@@ -55,11 +55,11 @@ impl Writer {
         self.task.await?
     }
 
-    fn write_event(event: SyncEvent, db: &Db, filter: &Filter, buffer_usage: f64) -> Result<()> {
+    fn write_event(event: SyncEvent, db: &Db, buffer_usage: f64) -> Result<()> {
         match event {
             SyncEvent::RollForward(cbor, tip) => {
                 let block = MultiEraBlock::decode(&cbor)?;
-                db.roll_forward(&block, filter)?;
+                db.roll_forward(&block)?;
 
                 let tip_slot = tip.0.slot_or_default();
                 if tip_slot.saturating_sub(1000) < block.slot() || block.number() % 1000 == 0 {
@@ -67,7 +67,7 @@ impl Writer {
                     tracing::info!(
                         block = block.number(),
                         slot = block.slot(),
-                        diff_to_expected = tip_slot.saturating_sub(block.slot()),
+                        slots_to_tip = tip_slot.saturating_sub(block.slot()),
                         sync_progress = format!("{sync_progress:.2}%"),
                         buffer_usage = format!("{buffer_usage:.2}%"),
                         "RollForward"

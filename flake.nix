@@ -50,8 +50,8 @@
             ${node}/bin/cardano-node run \
               --database-path db/node/data \
               --config db/node/mainnet-config.yaml \
-              --topology ./db/node/mainnet-topology.json \
-              --host-addr 127.0.0.1 \
+              --topology db/node/mainnet-topology.json \
+              --host-addr 0.0.0.0 \
               --port 3001
           '';
           clearNode = pkgs.writeShellScriptBin "clear-node" ''

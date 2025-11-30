@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use pallas::ledger::traverse::MultiEraHeader;
-use pallas::network::facades::{ PeerClient};
+use pallas::network::facades::PeerClient;
 use pallas::network::miniprotocols::Point;
-use pallas::network::miniprotocols::chainsync::{ NextResponse, Tip};
+use pallas::network::miniprotocols::chainsync::{NextResponse, Tip};
 use tracing::info;
 
 use crate::db::Db;
@@ -10,6 +10,7 @@ use crate::writer::Writer;
 
 const NODE_PATH: &str = "localhost:3001";
 const MAGIC: u64 = 764824073; // mainnet
+const BLOCKFETCH_CONCURRENCY: usize = 200;
 
 #[derive(Debug)]
 pub enum SyncEvent {
@@ -21,6 +22,7 @@ pub enum SyncEvent {
 
 pub struct Sync {
     node: PeerClient,
+    pending_fetches: Vec<(Point, Tip)>,
 }
 
 impl Sync {
@@ -45,11 +47,15 @@ impl Sync {
                 .context("failed to start from origin")?;
         }
 
-        Ok(Self { node })
+        Ok(Self {
+            node,
+            pending_fetches: vec![],
+        })
     }
 
     pub async fn next(&mut self, writer: &Writer) -> Result<()> {
         loop {
+            // Collect multiple headers first
             let next = {
                 let chainsync = self.node.chainsync();
                 match chainsync.has_agency() {
@@ -58,28 +64,50 @@ impl Sync {
                 }
             };
 
-            let event = match next {
+            match next {
                 NextResponse::RollForward(header, tip) => {
-                    let header = match header.byron_prefix {
-                        Some((subtag, _)) => {
-                            MultiEraHeader::decode(header.variant, Some(subtag), &header.cbor)
-                        }
-                        None => MultiEraHeader::decode(header.variant, None, &header.cbor),
-                    }?;
-                    let slot = header.slot();
-                    let hash = header.hash();
-                    let point = Point::Specific(slot, hash.to_vec());
+                    let subtag = header.byron_prefix.map(|(subtag, _)| subtag);
+                    let header = MultiEraHeader::decode(header.variant, subtag, &header.cbor)?;
+                    let point = Point::Specific(header.slot(), header.hash().to_vec());
+                    let is_at_tip = point == tip.0;
 
-                    let block = self.node.blockfetch().fetch_single(point.clone()).await?;
-
-                    SyncEvent::RollForward(block, tip)
+                    self.pending_fetches.push((point, tip));
+                    if self.pending_fetches.len() >= BLOCKFETCH_CONCURRENCY || is_at_tip {
+                        self.flush_pending_fetches(writer).await?;
+                    }
                 }
-                NextResponse::RollBackward(point, _) => SyncEvent::RollBackward(point),
-                NextResponse::Await => continue,
+                NextResponse::RollBackward(point, _) => {
+                    self.flush_pending_fetches(writer).await?;
+                    writer.send(SyncEvent::RollBackward(point)).await?;
+                }
+                NextResponse::Await => {
+                    self.flush_pending_fetches(writer).await?;
+                    break;
+                }
             };
-
-            writer.send(event).await?
         }
+
+        Ok(())
+    }
+
+    async fn flush_pending_fetches(&mut self, writer: &Writer) -> Result<()> {
+        if let Some((start, _)) = self.pending_fetches.first()
+            && let Some((end, tip)) = self.pending_fetches.last()
+        {
+            let blocks = self
+                .node
+                .blockfetch()
+                .fetch_range((start.clone(), end.clone()))
+                .await?;
+            assert!(blocks.len() == self.pending_fetches.len());
+            for block in blocks {
+                writer
+                    .send(SyncEvent::RollForward(block, tip.clone()))
+                    .await?;
+            }
+        }
+        self.pending_fetches.clear();
+        Ok(())
     }
 
     pub async fn stop(self) {

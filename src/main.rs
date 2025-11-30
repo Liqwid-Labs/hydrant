@@ -21,7 +21,8 @@ async fn main() -> Result<()> {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "Starting...");
 
     let db = Db::new("./db/hydrant")?;
-    let writer = Writer::new(&db, Box::new(|_, _, _, _| true));
+
+    let writer = Writer::new(&db);
     let mut sync = Sync::new(&db).await?;
 
     // Listen for chain-sync events until shutdown or error
