@@ -9,6 +9,7 @@ use tracing::debug;
 pub struct Env {
     env: heed::Env<WithTls>,
     resize_lock: Arc<RwLock<()>>,
+    page_size: usize,
 }
 
 impl From<heed::Env> for Env {
@@ -16,6 +17,7 @@ impl From<heed::Env> for Env {
         Self {
             env,
             resize_lock: Arc::new(RwLock::new(())),
+            page_size: page_size::get(),
         }
     }
 }
@@ -50,15 +52,14 @@ impl Env {
     pub fn resize(&self) -> anyhow::Result<()> {
         let info = self.env.info();
 
-        let page_size = page_size::get();
-        let used_size = page_size * info.last_page_number;
+        let used_size = self.page_size * info.last_page_number;
         let current_size = info.map_size;
         let free_size = current_size - used_size;
         let minimum_free_space = 1024 * 1024 * 1024; // 1GB
 
         if free_size < minimum_free_space || free_size > minimum_free_space * 2 {
             let new_size = current_size + minimum_free_space; // 1GB
-            let new_size = new_size + new_size % page_size; // Round up to next page
+            let new_size = new_size + new_size % self.page_size; // Round up to next page
 
             let lock = self.resize_lock.write().unwrap();
             self.env.clear_stale_readers()?;
