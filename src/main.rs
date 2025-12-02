@@ -38,10 +38,9 @@ async fn main() -> Result<()> {
         }
     };
 
-    let mut sync = Sync::new(&db, &indexer).await?;
-
     // Listen for chain-sync events until shutdown or error
     info!("Starting sync...");
+    let mut sync = Sync::new(&db, &indexer).await?;
     let sync_result = tokio::select! {
         res = sync.run() => res,
         _ = shutdown_signal() => {

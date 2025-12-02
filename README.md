@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-	Embeddable & configurable chain-indexer for Cardano
+	Embeddable & extensible chain-indexer for Cardano
 </p>
 
 **Hydrant** is an embeddable, extensible and fast chain-indexer for Cardano, designed to distill the chain to only the data needed for your usecase.
