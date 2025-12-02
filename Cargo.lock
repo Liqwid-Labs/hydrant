@@ -653,6 +653,7 @@ dependencies = [
  "hex",
  "minicbor 2.1.3",
  "num-bigint",
+ "page_size",
  "pallas",
  "rkyv",
  "tokio",

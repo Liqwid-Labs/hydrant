@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use heed::types::Bytes;
-use heed::{Database, Env, RwTxn};
+use heed::{Database, RwTxn};
 
 use crate::codec::RkyvCodec;
+use crate::env::Env;
 use crate::indexer::Indexer;
 use crate::indexer::oracle::datum::OracleDatum;
 use crate::tx::{Datum, DatumHash, Hash, Policy, Tx, TxOutput, TxOutputPointer};

@@ -2,20 +2,20 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use heed::byteorder::BigEndian;
-use heed::types::{Bytes, Str, U64};
-use heed::{Database, Env, EnvOpenOptions};
+use heed::types::U64;
+use heed::{Database, EnvOpenOptions};
 use pallas::ledger::traverse::MultiEraBlock;
 use pallas::network::miniprotocols::Point;
 use tracing::info;
 
 use crate::codec::RkyvCodec;
+use crate::env::Env;
 use crate::indexer::Indexer;
 use crate::tx::{Block, BlockHash, DatumHash, Tx, TxHash};
 
-const MAX_ROLLBACK_BLOCKS: usize = 2160;
-
 #[derive(Clone)]
 pub struct Db {
+    pub max_rollback_blocks: usize,
     pub env: Env,
     pub slots: Database<U64<BigEndian>, RkyvCodec<BlockHash>>,
     pub volatile_tx: Database<RkyvCodec<TxHash>, RkyvCodec<Tx>>,
@@ -23,7 +23,7 @@ pub struct Db {
 }
 
 impl Db {
-    pub fn new(path: &str, max_size: usize) -> Result<Self> {
+    pub fn new(path: &str, max_rollback_blocks: usize) -> Result<Self> {
         info!(?path, "Creating/opening database...");
         std::fs::create_dir_all(path)?;
         let env = unsafe {
@@ -34,7 +34,7 @@ impl Db {
                     | heed::EnvFlags::NO_META_SYNC // manually fsync metadata
                     | heed::EnvFlags::WRITE_MAP, // assume no memory unsafety in this program
                 )
-                .map_size(max_size)
+                .map_size(1024 * 1024 * 1024 * 2) // 2GB
                 .open(path)?
         };
 
@@ -45,7 +45,8 @@ impl Db {
         wtxn.commit()?;
 
         Ok(Self {
-            env,
+            max_rollback_blocks,
+            env: env.into(),
             slots,
             volatile_tx,
             volatile_block,
@@ -62,32 +63,12 @@ impl Db {
         }
     }
 
-    pub fn trim_volatile(&self) -> Result<()> {
-        let rtxn = self.env.read_txn()?;
-        let mut wtxn = self.env.write_txn()?;
-
-        for slot in self
-            .slots
-            .rev_range(&rtxn, &(0..))?
-            .skip(MAX_ROLLBACK_BLOCKS)
-        {
-            let (_, block_hash) = slot?;
-            let block_hash = rkyv::deserialize::<BlockHash, rkyv::rancor::Error>(block_hash)?;
-            let exists = self.volatile_block.delete(&mut wtxn, &block_hash)?;
-            if !exists {
-                break;
-            }
-        }
-
-        Ok(wtxn.commit()?)
-    }
-
     pub fn roll_forward(
         &self,
         indexer: &Arc<Mutex<impl Indexer>>,
         block: &MultiEraBlock,
     ) -> Result<()> {
-        let indexer = indexer.lock().unwrap();
+        let indexer = indexer.lock().expect("indexer mutex poisoned");
         let mut wtxn = self.env.write_txn()?;
 
         let mut tx_hashes = vec![];
@@ -112,7 +93,8 @@ impl Db {
         // Slot -> Block Hash
         self.slots.put(&mut wtxn, &block.slot, &block.hash)?;
 
-        Ok(wtxn.commit()?)
+        wtxn.commit()?;
+        self.env.resize()
     }
 
     pub fn roll_backward(&self, indexer: &Arc<Mutex<impl Indexer>>, point: &Point) -> Result<()> {
@@ -121,10 +103,9 @@ impl Db {
             Point::Specific(slot, _) => *slot + 1,
         };
 
-        let indexer = indexer.lock().unwrap();
+        let indexer = indexer.lock().expect("indexer mutex poisoned");
         let rtxn = self.env.read_txn()?;
         for res in self.slots.rev_range(&rtxn, &(slot..))? {
-            let mut wtxn = self.env.write_txn()?;
             let (slot, block_hash) = res?;
             let block_hash = rkyv::deserialize::<BlockHash, rkyv::rancor::Error>(block_hash)?;
 
@@ -132,14 +113,12 @@ impl Db {
                 .volatile_block
                 .get(&rtxn, &block_hash)?
                 .with_context(|| {
-                    format!(
-                        "Block not found, the db could be corrupted: {:?}",
-                        block_hash
-                    )
+                    format!("Block not found, the db could be corrupted: {}", block_hash)
                 })?;
 
             // NOTE: reverse order because a tx may spend outputs from a previous tx
             // in the same block
+            let mut wtxn = self.env.write_txn()?;
             for tx_hash in block.txs.iter().rev() {
                 let tx_hash = rkyv::deserialize::<TxHash, rkyv::rancor::Error>(tx_hash)?;
                 let tx = self
@@ -159,11 +138,31 @@ impl Db {
             wtxn.commit()?;
         }
 
-        Ok(())
+        self.env.resize()
+    }
+
+    pub fn trim_volatile(&self) -> Result<()> {
+        let rtxn = self.env.read_txn()?;
+        let mut wtxn = self.env.write_txn()?;
+
+        for slot in self
+            .slots
+            .rev_range(&rtxn, &(0..))?
+            .skip(self.max_rollback_blocks)
+        {
+            let (_, block_hash) = slot?;
+            let block_hash = rkyv::deserialize::<BlockHash, rkyv::rancor::Error>(block_hash)?;
+            let exists = self.volatile_block.delete(&mut wtxn, &block_hash)?;
+            if !exists {
+                break;
+            }
+        }
+
+        Ok(wtxn.commit()?)
     }
 
     pub fn clear(&self, indexer: &Arc<Mutex<impl Indexer>>) -> Result<()> {
-        let indexer = indexer.lock().unwrap();
+        let indexer = indexer.lock().expect("indexer mutex poisoned");
         let mut wtxn = self.env.write_txn()?;
 
         self.slots.clear(&mut wtxn)?;
@@ -171,10 +170,17 @@ impl Db {
         self.volatile_tx.clear(&mut wtxn)?;
         indexer.clear(&mut wtxn)?;
 
-        Ok(wtxn.commit()?)
+        wtxn.commit()?;
+        self.env.resize()
     }
 
     pub fn persist(&self) -> Result<()> {
         Ok(self.env.force_sync()?)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_max_rollback_blocks() {}
 }

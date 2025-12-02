@@ -1,20 +1,25 @@
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use pallas::network::facades::PeerClient;
 use tokio::signal;
 use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 
 mod codec;
 mod db;
+mod env;
 mod indexer;
 mod sync;
 mod tx;
 mod writer;
-use db::Db;
 
-use crate::indexer::oracle::OracleIndexer;
-use crate::sync::Sync;
+use db::Db;
+use indexer::oracle::OracleIndexer;
+use sync::Sync;
+
+const NODE_HOST: &str = "localhost:3001";
+const MAGIC: u64 = 764824073; // mainnet
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -24,7 +29,7 @@ async fn main() -> Result<()> {
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
     info!(version = env!("CARGO_PKG_VERSION"), "Starting...");
 
-    let db = Db::new("./db/hydrant", 1024 * 1024 * 1024 * 20)?;
+    let db = Db::new("./db/hydrant", 2160)?;
     let indexer = Arc::new(Mutex::new(OracleIndexer::new(&db.env)?));
 
     // Example logging Oracle UTxOs
@@ -38,14 +43,19 @@ async fn main() -> Result<()> {
         }
     };
 
+    info!("Connecting to node...");
+    let node = PeerClient::connect(NODE_HOST, MAGIC)
+        .await
+        .context("failed to connect to node")?;
+
     // Listen for chain-sync events until shutdown or error
     info!("Starting sync...");
-    let mut sync = Sync::new(&db, &indexer).await?;
+    let mut sync = Sync::new(node, &db, &indexer).await?;
     let sync_result = tokio::select! {
         res = sync.run() => res,
-        _ = shutdown_signal() => {
+        res = shutdown_signal() => {
             tracing::info!("Received shutdown signal");
-            Ok(())
+            res
         }
     };
     if let Err(error) = sync_result {
@@ -63,26 +73,27 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal() -> Result<()> {
     let ctrl_c = async {
         signal::ctrl_c()
             .await
-            .expect("failed to install Ctrl+C handler");
+            .context("failed to install Ctrl+C handler")
     };
 
     #[cfg(unix)]
     let terminate = async {
         signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
+            .context("failed to install signal handler")?
             .recv()
             .await;
+        Ok(())
     };
 
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
+        res = ctrl_c => res,
+        res = terminate => res,
     }
 }

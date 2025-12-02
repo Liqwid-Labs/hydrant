@@ -71,8 +71,8 @@ impl Writer {
                 db.roll_forward(indexer, &block)?;
 
                 let tip_slot = tip.0.slot_or_default();
-                let at_tip = tip_slot.saturating_sub(1000) < block.slot();
-                if at_tip || block.number() % 10000 == 0 {
+                let near_tip = tip_slot.saturating_sub(200) <= block.slot();
+                if near_tip || block.number() % 10000 == 0 {
                     db.trim_volatile()?;
                     db.persist()?;
 

@@ -13,8 +13,6 @@ use crate::db::Db;
 use crate::indexer::Indexer;
 use crate::writer::Writer;
 
-const NODE_HOST: &str = "localhost:3001";
-const MAGIC: u64 = 764824073; // mainnet
 const BLOCKFETCH_CONCURRENCY: usize = 200;
 
 #[derive(Debug)]
@@ -32,12 +30,11 @@ pub struct Sync {
 }
 
 impl Sync {
-    pub async fn new(db: &Db, indexer: &Arc<Mutex<impl Indexer + Send + 'static>>) -> Result<Self> {
-        info!("Connecting to node...");
-        let mut node = PeerClient::connect(NODE_HOST, MAGIC)
-            .await
-            .context("failed to connect to node")?;
-
+    pub async fn new(
+        mut node: PeerClient,
+        db: &Db,
+        indexer: &Arc<Mutex<impl Indexer + Send + 'static>>,
+    ) -> Result<Self> {
         let tip = db.tip()?;
         match db.tip()? {
             Point::Origin => {
@@ -63,38 +60,43 @@ impl Sync {
         })
     }
 
+    pub async fn next(&mut self) -> Result<()> {
+        let next = {
+            let chainsync = self.node.chainsync();
+            match chainsync.has_agency() {
+                true => chainsync.request_next().await?,
+                false => chainsync.recv_while_must_reply().await?,
+            }
+        };
+
+        match next {
+            NextResponse::RollForward(header, tip) => {
+                let subtag = header.byron_prefix.map(|(subtag, _)| subtag);
+                let header = MultiEraHeader::decode(header.variant, subtag, &header.cbor)?;
+                let point = Point::Specific(header.slot(), header.hash().to_vec());
+                let is_at_tip = point == tip.0;
+
+                self.pending_fetches.push((point, tip));
+                if self.pending_fetches.len() >= BLOCKFETCH_CONCURRENCY || is_at_tip {
+                    self.flush_pending_fetches().await?;
+                }
+            }
+            NextResponse::RollBackward(point, _) => {
+                self.flush_pending_fetches().await?;
+                self.writer.send(SyncEvent::RollBackward(point)).await?;
+            }
+            NextResponse::Await => {
+                self.flush_pending_fetches().await?;
+                sleep(Duration::from_millis(10)).await;
+            }
+        };
+
+        Ok(())
+    }
+
     pub async fn run(&mut self) -> Result<()> {
         loop {
-            // Collect multiple headers first
-            let next = {
-                let chainsync = self.node.chainsync();
-                match chainsync.has_agency() {
-                    true => chainsync.request_next().await?,
-                    false => chainsync.recv_while_must_reply().await?,
-                }
-            };
-
-            match next {
-                NextResponse::RollForward(header, tip) => {
-                    let subtag = header.byron_prefix.map(|(subtag, _)| subtag);
-                    let header = MultiEraHeader::decode(header.variant, subtag, &header.cbor)?;
-                    let point = Point::Specific(header.slot(), header.hash().to_vec());
-                    let is_at_tip = point == tip.0;
-
-                    self.pending_fetches.push((point, tip));
-                    if self.pending_fetches.len() >= BLOCKFETCH_CONCURRENCY || is_at_tip {
-                        self.flush_pending_fetches().await?;
-                    }
-                }
-                NextResponse::RollBackward(point, _) => {
-                    self.flush_pending_fetches().await?;
-                    self.writer.send(SyncEvent::RollBackward(point)).await?;
-                }
-                NextResponse::Await => {
-                    self.flush_pending_fetches().await?;
-                    sleep(Duration::from_millis(10)).await;
-                }
-            };
+            self.next().await?
         }
     }
 
@@ -107,7 +109,13 @@ impl Sync {
                 .blockfetch()
                 .fetch_range((start.clone(), end.clone()))
                 .await?;
-            assert!(blocks.len() == self.pending_fetches.len());
+            if blocks.len() != self.pending_fetches.len() {
+                return Err(anyhow::anyhow!(
+                    "fetched {} blocks, expected {}",
+                    blocks.len(),
+                    self.pending_fetches.len()
+                ));
+            }
             for block in blocks {
                 self.writer
                     .send(SyncEvent::RollForward(block, tip.clone()))
