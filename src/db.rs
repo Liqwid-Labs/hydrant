@@ -17,7 +17,6 @@ const MAX_ROLLBACK_BLOCKS: usize = 2160;
 #[derive(Clone)]
 pub struct Db {
     pub env: Env,
-    state: Database<Str, Bytes>,
     pub slots: Database<U64<BigEndian>, RkyvCodec<BlockHash>>,
     pub volatile_tx: Database<RkyvCodec<TxHash>, RkyvCodec<Tx>>,
     pub volatile_block: Database<RkyvCodec<BlockHash>, RkyvCodec<Block>>,
@@ -40,7 +39,6 @@ impl Db {
         };
 
         let mut wtxn = env.write_txn()?;
-        let state = env.create_database(&mut wtxn, Some("state"))?;
         let slots = env.create_database(&mut wtxn, Some("slots"))?;
         let volatile_tx = env.create_database(&mut wtxn, Some("volatile_tx"))?;
         let volatile_block = env.create_database(&mut wtxn, Some("volatile_block"))?;
@@ -48,7 +46,6 @@ impl Db {
 
         Ok(Self {
             env,
-            state,
             slots,
             volatile_tx,
             volatile_block,
@@ -169,7 +166,6 @@ impl Db {
         let indexer = indexer.lock().unwrap();
         let mut wtxn = self.env.write_txn()?;
 
-        self.state.clear(&mut wtxn)?;
         self.slots.clear(&mut wtxn)?;
         self.volatile_block.clear(&mut wtxn)?;
         self.volatile_tx.clear(&mut wtxn)?;
