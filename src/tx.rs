@@ -108,7 +108,7 @@ pub struct TxOutput {
     pub lovelace: u64,
     pub assets: Vec<Asset>,
     pub datum_hash: Option<DatumHash>,
-    // TODO: script ref, inline datum
+    // TODO: script ref
 }
 
 impl TxOutput {
@@ -139,24 +139,6 @@ impl TxOutput {
             },
             datum,
         )
-    }
-}
-
-// UTxO Guard
-#[derive(Clone, Debug, Archive, Deserialize, Serialize)]
-pub struct UTxOGuard<T>(T, bool)
-where
-    T: Clone + std::fmt::Debug + Archive;
-
-impl<T> UTxOGuard<T>
-where
-    T: Clone + std::fmt::Debug + Archive,
-{
-    pub fn utxo(value: T) -> Self {
-        Self(value, true)
-    }
-    pub fn stxo(value: T) -> Self {
-        Self(value, false)
     }
 }
 
