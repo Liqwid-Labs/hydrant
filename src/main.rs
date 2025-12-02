@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use anyhow::Result;
 use tokio::signal;
 use tracing::{Level, error, info};
@@ -5,13 +7,14 @@ use tracing_subscriber::FmtSubscriber;
 
 mod codec;
 mod db;
+mod indexer;
 mod sync;
 mod tx;
 mod writer;
 use db::Db;
 
+use crate::indexer::oracle::OracleIndexer;
 use crate::sync::Sync;
-use crate::writer::Writer;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -19,16 +22,28 @@ async fn main() -> Result<()> {
         .with_max_level(Level::INFO)
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "Starting...");
+    info!(version = env!("CARGO_PKG_VERSION"), "Starting...");
 
-    let db = Db::new("./db/hydrant")?;
-    let writer = Writer::new(&db);
-    let mut sync = Sync::new(&db).await?;
+    let db = Db::new("./db/hydrant", 1024 * 1024 * 1024 * 20)?;
+    let indexer = Arc::new(Mutex::new(OracleIndexer::new(&db.env)?));
+
+    // Example logging Oracle UTxOs
+    {
+        let indexer = indexer.lock().unwrap();
+        for (tx_pointer, utxo) in indexer.utxos()?.iter() {
+            println!("{}", hex::encode(*tx_pointer.hash));
+            if let Some(datum_hash) = &utxo.datum_hash {
+                println!("{:?}", indexer.datum(datum_hash)?);
+            }
+        }
+    };
+
+    let mut sync = Sync::new(&db, &indexer).await?;
 
     // Listen for chain-sync events until shutdown or error
     info!("Starting sync...");
     let sync_result = tokio::select! {
-        res = sync.next(&writer) => res,
+        res = sync.run() => res,
         _ = shutdown_signal() => {
             tracing::info!("Received shutdown signal");
             Ok(())
@@ -39,10 +54,7 @@ async fn main() -> Result<()> {
     }
 
     info!("Stopping sync...");
-    sync.stop().await;
-
-    info!("Stopping writer...");
-    if let Err(error) = writer.stop().await {
+    if let Err(error) = sync.stop().await {
         error!(?error, "Error while writing");
     }
 

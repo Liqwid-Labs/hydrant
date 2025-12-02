@@ -1,14 +1,19 @@
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use pallas::ledger::traverse::MultiEraHeader;
 use pallas::network::facades::PeerClient;
 use pallas::network::miniprotocols::Point;
 use pallas::network::miniprotocols::chainsync::{NextResponse, Tip};
+use tokio::time::sleep;
 use tracing::info;
 
 use crate::db::Db;
+use crate::indexer::Indexer;
 use crate::writer::Writer;
 
-const NODE_PATH: &str = "localhost:3001";
+const NODE_HOST: &str = "localhost:3001";
 const MAGIC: u64 = 764824073; // mainnet
 const BLOCKFETCH_CONCURRENCY: usize = 200;
 
@@ -22,38 +27,43 @@ pub enum SyncEvent {
 
 pub struct Sync {
     node: PeerClient,
+    writer: Writer,
     pending_fetches: Vec<(Point, Tip)>,
 }
 
 impl Sync {
-    pub async fn new(db: &Db) -> Result<Self> {
+    pub async fn new(db: &Db, indexer: &Arc<Mutex<impl Indexer + Send + 'static>>) -> Result<Self> {
         info!("Connecting to node...");
-        let mut node = PeerClient::connect(NODE_PATH, MAGIC)
+        let mut node = PeerClient::connect(NODE_HOST, MAGIC)
             .await
             .context("failed to connect to node")?;
 
-        let chainsync = node.chainsync();
-        if let Some(tip) = db.tip()? {
-            info!(?tip, "Requesting intersection");
-            chainsync
-                .find_intersect(vec![tip])
-                .await
-                .context("failed to request intersection")?;
-        } else {
-            info!("No tip, starting from origin");
-            chainsync
-                .intersect_origin()
-                .await
-                .context("failed to start from origin")?;
-        }
+        let tip = db.tip()?;
+        match db.tip()? {
+            Point::Origin => {
+                info!("No tip, starting from origin");
+                node.chainsync()
+                    .intersect_origin()
+                    .await
+                    .context("failed to start from origin")?;
+            }
+            Point::Specific(_, _) => {
+                info!(?tip, "Requesting intersection");
+                node.chainsync()
+                    .find_intersect(vec![tip])
+                    .await
+                    .context("failed to request intersection")?;
+            }
+        };
 
         Ok(Self {
             node,
+            writer: Writer::new(db, indexer),
             pending_fetches: vec![],
         })
     }
 
-    pub async fn next(&mut self, writer: &Writer) -> Result<()> {
+    pub async fn run(&mut self) -> Result<()> {
         loop {
             // Collect multiple headers first
             let next = {
@@ -73,24 +83,22 @@ impl Sync {
 
                     self.pending_fetches.push((point, tip));
                     if self.pending_fetches.len() >= BLOCKFETCH_CONCURRENCY || is_at_tip {
-                        self.flush_pending_fetches(writer).await?;
+                        self.flush_pending_fetches().await?;
                     }
                 }
                 NextResponse::RollBackward(point, _) => {
-                    self.flush_pending_fetches(writer).await?;
-                    writer.send(SyncEvent::RollBackward(point)).await?;
+                    self.flush_pending_fetches().await?;
+                    self.writer.send(SyncEvent::RollBackward(point)).await?;
                 }
                 NextResponse::Await => {
-                    self.flush_pending_fetches(writer).await?;
-                    break;
+                    self.flush_pending_fetches().await?;
+                    sleep(Duration::from_millis(10)).await;
                 }
             };
         }
-
-        Ok(())
     }
 
-    async fn flush_pending_fetches(&mut self, writer: &Writer) -> Result<()> {
+    async fn flush_pending_fetches(&mut self) -> Result<()> {
         if let Some((start, _)) = self.pending_fetches.first()
             && let Some((end, tip)) = self.pending_fetches.last()
         {
@@ -101,7 +109,7 @@ impl Sync {
                 .await?;
             assert!(blocks.len() == self.pending_fetches.len());
             for block in blocks {
-                writer
+                self.writer
                     .send(SyncEvent::RollForward(block, tip.clone()))
                     .await?;
             }
@@ -110,7 +118,8 @@ impl Sync {
         Ok(())
     }
 
-    pub async fn stop(self) {
-        self.node.abort().await
+    pub async fn stop(self) -> Result<()> {
+        self.node.abort().await;
+        self.writer.stop().await.context("error while writing")
     }
 }

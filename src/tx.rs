@@ -1,4 +1,5 @@
-use std::ops::Deref;
+use std::collections::HashMap;
+use std::ops::{Deref, RangeInclusive};
 
 use pallas::ledger::primitives::conway::PseudoDatumOption;
 use pallas::ledger::traverse::{
@@ -50,7 +51,7 @@ pub struct Tx {
 }
 
 impl Tx {
-    pub fn parse(tx: &MultiEraTx) -> (Self, Vec<(DatumHash, Datum)>) {
+    pub fn parse(tx: &MultiEraTx) -> (Self, HashMap<DatumHash, Datum>) {
         let inputs = tx.inputs_sorted_set().into_iter().map(Into::into).collect();
         let (outputs, mut datums): (Vec<TxOutput>, Vec<Option<(DatumHash, Datum)>>) =
             tx.outputs().into_iter().map(|x| TxOutput::parse(x)).unzip();
@@ -173,6 +174,18 @@ impl TxOutputPointer {
             index: index as u64,
         }
     }
+
+    pub fn range(hash: &TxHash) -> RangeInclusive<Self> {
+        let start = Self {
+            hash: hash.clone(),
+            index: 0,
+        };
+        let end = Self {
+            hash: hash.clone(),
+            index: u64::MAX,
+        };
+        start..=end
+    }
 }
 impl From<MultiEraInput<'_>> for TxOutputPointer {
     fn from(input: MultiEraInput) -> Self {
@@ -184,8 +197,8 @@ impl From<MultiEraInput<'_>> for TxOutputPointer {
 
 // Hash
 
-#[derive(Clone, Debug, Archive, Deserialize, Serialize)]
-pub struct Hash<const BYTES: usize>([u8; BYTES]);
+#[derive(Clone, Debug, Archive, Deserialize, Serialize, PartialEq, Eq, Hash)]
+pub struct Hash<const BYTES: usize>(pub [u8; BYTES]);
 impl<const BYTES: usize> From<[u8; BYTES]> for Hash<BYTES> {
     fn from(bytes: [u8; BYTES]) -> Self {
         Self(bytes)
@@ -206,6 +219,28 @@ impl<const BYTES: usize> Deref for Hash<BYTES> {
 
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+impl<'a, C, const BYTES: usize> minicbor::Decode<'a, C> for Hash<BYTES> {
+    fn decode(
+        d: &mut minicbor::Decoder<'a>,
+        _ctx: &mut C,
+    ) -> Result<Self, minicbor::decode::Error> {
+        let bytes = d.bytes()?;
+        if bytes.len() == BYTES {
+            let mut hash = [0; BYTES];
+            hash.copy_from_slice(bytes);
+            Ok(Self(hash))
+        } else {
+            // TODO: minicbor does not allow for expecting a specific size byte array
+            //       (in fact cbor is not good at it at all anyway)
+            Err(minicbor::decode::Error::message("Invalid hash size"))
+        }
+    }
+}
+impl<const BYTES: usize> std::fmt::Display for Hash<BYTES> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        hex::encode(self.deref()).fmt(f)
     }
 }
 

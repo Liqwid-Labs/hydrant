@@ -1,28 +1,30 @@
+use std::sync::{Arc, Mutex};
+
 use anyhow::{Context, Result};
 use heed::byteorder::BigEndian;
 use heed::types::{Bytes, Str, U64};
 use heed::{Database, Env, EnvOpenOptions};
-use pallas::codec::minicbor;
 use pallas::ledger::traverse::MultiEraBlock;
 use pallas::network::miniprotocols::Point;
 use tracing::info;
 
 use crate::codec::RkyvCodec;
-use crate::tx::{Block, BlockHash, Datum, DatumHash, Tx, TxHash, TxOutputPointer};
+use crate::indexer::Indexer;
+use crate::tx::{Block, BlockHash, DatumHash, Tx, TxHash};
+
+const MAX_ROLLBACK_BLOCKS: usize = 2160;
 
 #[derive(Clone)]
 pub struct Db {
     pub env: Env,
     state: Database<Str, Bytes>,
     pub slots: Database<U64<BigEndian>, RkyvCodec<BlockHash>>,
-    pub blocks: Database<RkyvCodec<BlockHash>, RkyvCodec<Block>>,
-    pub txs: Database<RkyvCodec<TxHash>, RkyvCodec<Tx>>,
-    pub utxos: Database<RkyvCodec<TxOutputPointer>, RkyvCodec<()>>,
-    pub datums: Database<RkyvCodec<DatumHash>, RkyvCodec<Datum>>,
+    pub volatile_tx: Database<RkyvCodec<TxHash>, RkyvCodec<Tx>>,
+    pub volatile_block: Database<RkyvCodec<BlockHash>, RkyvCodec<Block>>,
 }
 
 impl Db {
-    pub fn new(path: &str) -> Result<Self> {
+    pub fn new(path: &str, max_size: usize) -> Result<Self> {
         info!(?path, "Creating/opening database...");
         std::fs::create_dir_all(path)?;
         let env = unsafe {
@@ -33,162 +35,150 @@ impl Db {
                     | heed::EnvFlags::NO_META_SYNC // manually fsync metadata
                     | heed::EnvFlags::WRITE_MAP, // assume no memory unsafety in this program
                 )
-                .map_size(1024 * 1024 * 1024 * 500) // maximum size of LMDB (500GB)
+                .map_size(max_size)
                 .open(path)?
         };
 
         let mut wtxn = env.write_txn()?;
         let state = env.create_database(&mut wtxn, Some("state"))?;
         let slots = env.create_database(&mut wtxn, Some("slots"))?;
-        let blocks = env.create_database(&mut wtxn, Some("blocks"))?;
-        let txs = env.create_database(&mut wtxn, Some("txs"))?;
-        let utxos = env.create_database(&mut wtxn, Some("utxos"))?;
-        let datums = env.create_database(&mut wtxn, Some("datums"))?;
+        let volatile_tx = env.create_database(&mut wtxn, Some("volatile_tx"))?;
+        let volatile_block = env.create_database(&mut wtxn, Some("volatile_block"))?;
         wtxn.commit()?;
 
         Ok(Self {
             env,
             state,
             slots,
-            blocks,
-            txs,
-            utxos,
-            datums,
+            volatile_tx,
+            volatile_block,
         })
     }
 
-    pub fn tip(&self) -> Result<Option<Point>> {
+    pub fn tip(&self) -> Result<Point> {
         let rtxn = self.env.read_txn()?;
-        self.state
-            .get(&rtxn, "tip")?
-            .map(|v| {
-                minicbor::decode::<Point>(v)
-                    .context("failed to decode tip, the db could be corrupted")
-            })
-            .transpose()
+        if let Some((slot, block_hash)) = self.slots.rev_range(&rtxn, &(0..))?.next().transpose()? {
+            let block_hash = rkyv::deserialize::<BlockHash, rkyv::rancor::Error>(block_hash)?;
+            Ok(Point::Specific(slot, block_hash.to_vec()))
+        } else {
+            Ok(Point::Origin)
+        }
     }
 
-    fn set_tip(&self, wtxn: &mut heed::RwTxn, tip: &Point) -> Result<()> {
-        let mut buffer = [0u8; 40];
-        minicbor::encode(tip, buffer.as_mut()).context("failed to encode tip")?;
-        self.state.put(wtxn, "tip", &buffer)?;
-        Ok(())
+    pub fn trim_volatile(&self) -> Result<()> {
+        let rtxn = self.env.read_txn()?;
+        let mut wtxn = self.env.write_txn()?;
+
+        for slot in self
+            .slots
+            .rev_range(&rtxn, &(0..))?
+            .skip(MAX_ROLLBACK_BLOCKS)
+        {
+            let (_, block_hash) = slot?;
+            let block_hash = rkyv::deserialize::<BlockHash, rkyv::rancor::Error>(block_hash)?;
+            let exists = self.volatile_block.delete(&mut wtxn, &block_hash)?;
+            if !exists {
+                break;
+            }
+        }
+
+        Ok(wtxn.commit()?)
     }
 
-    pub fn roll_forward(&self, block: &MultiEraBlock) -> Result<()> {
-        // TODO: verify block network id
-
+    pub fn roll_forward(
+        &self,
+        indexer: &Arc<Mutex<impl Indexer>>,
+        block: &MultiEraBlock,
+    ) -> Result<()> {
+        let indexer = indexer.lock().unwrap();
         let mut wtxn = self.env.write_txn()?;
 
         let mut tx_hashes = vec![];
         let mut datum_hashes = vec![];
         for raw_tx in block.txs().iter() {
             let (tx, datums) = Tx::parse(raw_tx);
-
-            // Datum Hash -> Datum
-            for (hash, data) in datums {
-                if self.datums.get(&wtxn, &hash)?.is_none() {
-                    datum_hashes.push(hash.clone());
-                    self.datums.put(&mut wtxn, &hash, &data)?;
+            if indexer.insert_tx(&mut wtxn, &tx)? {
+                tx_hashes.push(tx.hash.clone());
+                self.volatile_tx.put(&mut wtxn, &tx.hash, &tx)?;
+            }
+            for (datum_hash, datum) in datums.iter() {
+                if indexer.insert_datum(&mut wtxn, datum_hash, datum)? {
+                    datum_hashes.push(datum_hash.clone());
                 }
             }
-
-            // Mark outputs as unspent
-            for (index, _) in tx.unspent().enumerate() {
-                let pointer = TxOutputPointer::new(tx.hash.clone(), index);
-                self.utxos.put(&mut wtxn, &pointer, &())?;
-            }
-
-            // Mark inputs as spent
-            for pointer in tx.spent() {
-                self.utxos.delete(&mut wtxn, pointer)?;
-            }
-
-            // Tx Hash -> Tx
-            tx_hashes.push(tx.hash.clone());
-            self.txs.put(&mut wtxn, &tx.hash, &tx)?;
         }
 
         // Block Hash -> Block
         let block = Block::parse(block, tx_hashes, datum_hashes);
-        self.blocks.put(&mut wtxn, &block.hash, &block)?;
+        self.volatile_block.put(&mut wtxn, &block.hash, &block)?;
 
         // Slot -> Block Hash
         self.slots.put(&mut wtxn, &block.slot, &block.hash)?;
 
-        self.set_tip(&mut wtxn, &Point::Specific(block.slot, block.hash.to_vec()))?;
-
         Ok(wtxn.commit()?)
     }
 
-    pub fn roll_backward(&self, point: &Point) -> Result<()> {
-        // TODO: cleanup datums
+    pub fn roll_backward(&self, indexer: &Arc<Mutex<impl Indexer>>, point: &Point) -> Result<()> {
         let slot = match point {
-            Point::Origin => return self.clear(),
+            Point::Origin => return self.clear(indexer),
             Point::Specific(slot, _) => *slot + 1,
         };
 
+        let indexer = indexer.lock().unwrap();
         let rtxn = self.env.read_txn()?;
         for res in self.slots.rev_range(&rtxn, &(slot..))? {
             let mut wtxn = self.env.write_txn()?;
             let (slot, block_hash) = res?;
-            info!(?slot, "Rolling back slot");
             let block_hash = rkyv::deserialize::<BlockHash, rkyv::rancor::Error>(block_hash)?;
 
-            let block = self.blocks.get(&rtxn, &block_hash)?.with_context(|| {
-                format!(
-                    "Block not found, the db could be corrupted: {:?}",
-                    block_hash
-                )
-            })?;
+            let block = self
+                .volatile_block
+                .get(&rtxn, &block_hash)?
+                .with_context(|| {
+                    format!(
+                        "Block not found, the db could be corrupted: {:?}",
+                        block_hash
+                    )
+                })?;
 
             // NOTE: reverse order because a tx may spend outputs from a previous tx
             // in the same block
             for tx_hash in block.txs.iter().rev() {
                 let tx_hash = rkyv::deserialize::<TxHash, rkyv::rancor::Error>(tx_hash)?;
-
-                let tx = self.txs.get(&wtxn, &tx_hash)?.with_context(|| {
-                    format!("Tx not found, the db could be corrupted: {:?}", tx_hash)
-                })?;
+                let tx = self
+                    .volatile_tx
+                    .get(&rtxn, &tx_hash)?
+                    .context("missing tx")?;
                 let tx = rkyv::deserialize::<Tx, rkyv::rancor::Error>(tx)?;
-
-                // Mark outputs as spent
-                for (index, _) in tx.unspent().enumerate() {
-                    let pointer = TxOutputPointer::new(tx.hash.clone(), index);
-                    self.utxos.delete(&mut wtxn, &pointer)?;
-                }
-
-                // Mark inputs as unspent
-                for pointer in tx.spent() {
-                    self.utxos.put(&mut wtxn, pointer, &())?;
-                }
-
-                self.txs.delete(&mut wtxn, &tx_hash)?;
+                indexer.delete_tx(&mut wtxn, &tx)?;
+            }
+            for datum_hash in block.datums.iter().rev() {
+                let datum_hash = rkyv::deserialize::<DatumHash, rkyv::rancor::Error>(datum_hash)?;
+                indexer.delete_datum(&mut wtxn, &datum_hash)?;
             }
 
             self.slots.delete(&mut wtxn, &slot)?;
-            self.blocks.delete(&mut wtxn, &block_hash)?;
-            self.set_tip(&mut wtxn, &Point::Specific(slot, block_hash.to_vec()))?;
+            self.volatile_block.delete(&mut wtxn, &block_hash)?;
             wtxn.commit()?;
         }
 
         Ok(())
     }
 
-    pub fn clear(&self) -> Result<()> {
+    pub fn clear(&self, indexer: &Arc<Mutex<impl Indexer>>) -> Result<()> {
+        let indexer = indexer.lock().unwrap();
         let mut wtxn = self.env.write_txn()?;
+
         self.state.clear(&mut wtxn)?;
         self.slots.clear(&mut wtxn)?;
-        self.blocks.clear(&mut wtxn)?;
-        self.txs.clear(&mut wtxn)?;
-        self.datums.clear(&mut wtxn)?;
-        self.utxos.clear(&mut wtxn)?;
-        wtxn.commit()?;
-        Ok(())
+        self.volatile_block.clear(&mut wtxn)?;
+        self.volatile_tx.clear(&mut wtxn)?;
+        indexer.clear(&mut wtxn)?;
+
+        Ok(wtxn.commit()?)
     }
 
     pub fn persist(&self) -> Result<()> {
-        self.env.force_sync()?;
-        Ok(())
+        Ok(self.env.force_sync()?)
     }
 }

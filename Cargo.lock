@@ -650,6 +650,9 @@ dependencies = [
  "bincode 2.0.1",
  "fjall",
  "heed",
+ "hex",
+ "minicbor 2.1.3",
+ "num-bigint",
  "pallas",
  "rkyv",
  "tokio",
@@ -948,7 +951,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c0452a60c1863c1f50b5f77cd295e8d2786849f35883f0b9e18e7e6e1b5691b0"
 dependencies = [
  "half",
- "minicbor-derive",
+ "minicbor-derive 0.15.3",
+]
+
+[[package]]
+name = "minicbor"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9a1119e42fbacc2bb65d860de6eb7c930562bc71d42dca026d06b0228231f77"
+dependencies = [
+ "minicbor-derive 0.18.3",
 ]
 
 [[package]]
@@ -956,6 +968,17 @@ name = "minicbor-derive"
 version = "0.15.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bd2209fff77f705b00c737016a48e73733d7fbccb8b007194db148f03561fb70"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "minicbor-derive"
+version = "0.18.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50fcf6ee04e942da7d65066bf427fe7bdd229256998809eeecee25db6dc9aac2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1016,6 +1039,7 @@ checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
 dependencies = [
  "num-integer",
  "num-traits",
+ "serde",
 ]
 
 [[package]]
@@ -1126,7 +1150,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b2737b05f0dbb6d197feeb26ef15d2567e54833184bd469f5655a0537da89fa"
 dependencies = [
  "hex",
- "minicbor",
+ "minicbor 0.25.1",
  "serde",
  "thiserror",
 ]
