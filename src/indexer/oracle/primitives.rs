@@ -3,7 +3,7 @@ use minicbor::decode::Error;
 use minicbor::{Decode, Decoder, Encode};
 use num_bigint::{BigInt as _BigInt, Sign};
 
-use crate::tx::Hash;
+use crate::primitives::Hash;
 
 pub type POSIXTime = i64;
 

@@ -2,11 +2,10 @@ use anyhow::{Context, Result};
 use heed::types::Bytes;
 use heed::{Database, RwTxn};
 
-use crate::codec::RkyvCodec;
-use crate::env::Env;
+use crate::db::{Env, RkyvCodec};
 use crate::indexer::Indexer;
 use crate::indexer::oracle::datum::OracleDatum;
-use crate::tx::{Datum, DatumHash, Hash, Policy, Tx, TxOutput, TxOutputPointer};
+use crate::primitives::{Datum, DatumHash, Hash, Policy, Tx, TxOutput, TxOutputPointer};
 
 mod datum;
 mod primitives;
@@ -66,6 +65,10 @@ impl OracleIndexer {
 }
 
 impl Indexer for OracleIndexer {
+    fn id(&self) -> String {
+        "oracle".to_string()
+    }
+
     fn insert_tx(&self, wtxn: &mut RwTxn, tx: &Tx) -> anyhow::Result<bool> {
         let mut added_some = false;
 

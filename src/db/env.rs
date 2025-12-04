@@ -58,7 +58,7 @@ impl Env {
         let minimum_free_space = 1024 * 1024 * 1024; // 1GB
 
         if free_size < minimum_free_space || free_size > minimum_free_space * 2 {
-            let new_size = current_size + minimum_free_space; // 1GB
+            let new_size = current_size + minimum_free_space;
             let new_size = new_size + new_size % self.page_size; // Round up to next page
 
             let lock = self.resize_lock.write().unwrap();
@@ -75,6 +75,7 @@ impl Env {
             debug!(?current_size, ?new_size, "Resized database");
             drop(lock)
         }
+
         Ok(())
     }
 }

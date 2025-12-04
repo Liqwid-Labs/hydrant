@@ -1,5 +1,3 @@
-use std::sync::{Arc, Mutex};
-
 use anyhow::{Context, Result};
 use heed::byteorder::BigEndian;
 use heed::types::U64;
@@ -8,10 +6,14 @@ use pallas::ledger::traverse::MultiEraBlock;
 use pallas::network::miniprotocols::Point;
 use tracing::info;
 
-use crate::codec::RkyvCodec;
-use crate::env::Env;
-use crate::indexer::Indexer;
-use crate::tx::{Block, BlockHash, DatumHash, Tx, TxHash};
+use crate::indexer::IndexerList;
+use crate::primitives::{BlockHash, DatumHash, Tx, TxHash, VolatileBlock};
+
+mod codec;
+mod env;
+
+pub use codec::RkyvCodec;
+pub use env::Env;
 
 #[derive(Clone)]
 pub struct Db {
@@ -19,7 +21,7 @@ pub struct Db {
     pub env: Env,
     pub slots: Database<U64<BigEndian>, RkyvCodec<BlockHash>>,
     pub volatile_tx: Database<RkyvCodec<TxHash>, RkyvCodec<Tx>>,
-    pub volatile_block: Database<RkyvCodec<BlockHash>, RkyvCodec<Block>>,
+    pub volatile_block: Database<RkyvCodec<BlockHash>, RkyvCodec<VolatileBlock>>,
 }
 
 impl Db {
@@ -63,31 +65,40 @@ impl Db {
         }
     }
 
-    pub fn roll_forward(
-        &self,
-        indexer: &Arc<Mutex<impl Indexer>>,
-        block: &MultiEraBlock,
-    ) -> Result<()> {
-        let indexer = indexer.lock().expect("indexer mutex poisoned");
+    pub fn roll_forward(&self, indexers: &IndexerList, block: &MultiEraBlock) -> Result<()> {
+        let indexers = indexers
+            .iter()
+            .map(|i| i.lock().expect("indexer mutex poisoned"))
+            .collect::<Vec<_>>();
         let mut wtxn = self.env.write_txn()?;
 
+        // Pass datums + txs to each indexer, storing the hashes of those that got inserted
         let mut tx_hashes = vec![];
         let mut datum_hashes = vec![];
         for raw_tx in block.txs().iter() {
             let (tx, datums) = Tx::parse(raw_tx);
-            if indexer.insert_tx(&mut wtxn, &tx)? {
+
+            let did_insert_tx = indexers.iter().try_fold(false, |acc, i| {
+                i.insert_tx(&mut wtxn, &tx).map(|b| acc || b)
+            })?;
+            if did_insert_tx {
                 tx_hashes.push(tx.hash.clone());
                 self.volatile_tx.put(&mut wtxn, &tx.hash, &tx)?;
             }
+
             for (datum_hash, datum) in datums.iter() {
-                if indexer.insert_datum(&mut wtxn, datum_hash, datum)? {
+                let did_insert_datum = indexers.iter().try_fold(false, |acc, i| {
+                    i.insert_datum(&mut wtxn, datum_hash, datum)
+                        .map(|b| acc || b)
+                })?;
+                if did_insert_datum {
                     datum_hashes.push(datum_hash.clone());
                 }
             }
         }
 
         // Block Hash -> Block
-        let block = Block::parse(block, tx_hashes, datum_hashes);
+        let block = VolatileBlock::parse(block, tx_hashes, datum_hashes);
         self.volatile_block.put(&mut wtxn, &block.hash, &block)?;
 
         // Slot -> Block Hash
@@ -97,13 +108,16 @@ impl Db {
         self.env.resize()
     }
 
-    pub fn roll_backward(&self, indexer: &Arc<Mutex<impl Indexer>>, point: &Point) -> Result<()> {
+    pub fn roll_backward(&self, indexers: &IndexerList, point: &Point) -> Result<()> {
         let slot = match point {
-            Point::Origin => return self.clear(indexer),
+            Point::Origin => return self.clear(indexers),
             Point::Specific(slot, _) => *slot + 1,
         };
 
-        let indexer = indexer.lock().expect("indexer mutex poisoned");
+        let indexers = indexers
+            .iter()
+            .map(|i| i.lock().expect("indexer mutex poisoned"))
+            .collect::<Vec<_>>();
         let rtxn = self.env.read_txn()?;
         for res in self.slots.rev_range(&rtxn, &(slot..))? {
             let (slot, block_hash) = res?;
@@ -126,11 +140,15 @@ impl Db {
                     .get(&rtxn, &tx_hash)?
                     .context("missing tx")?;
                 let tx = rkyv::deserialize::<Tx, rkyv::rancor::Error>(tx)?;
-                indexer.delete_tx(&mut wtxn, &tx)?;
+                for indexer in indexers.iter() {
+                    indexer.delete_tx(&mut wtxn, &tx)?;
+                }
             }
             for datum_hash in block.datums.iter().rev() {
                 let datum_hash = rkyv::deserialize::<DatumHash, rkyv::rancor::Error>(datum_hash)?;
-                indexer.delete_datum(&mut wtxn, &datum_hash)?;
+                for indexer in indexers.iter() {
+                    indexer.delete_datum(&mut wtxn, &datum_hash)?;
+                }
             }
 
             self.slots.delete(&mut wtxn, &slot)?;
@@ -161,14 +179,19 @@ impl Db {
         Ok(wtxn.commit()?)
     }
 
-    pub fn clear(&self, indexer: &Arc<Mutex<impl Indexer>>) -> Result<()> {
-        let indexer = indexer.lock().expect("indexer mutex poisoned");
+    pub fn clear(&self, indexers: &IndexerList) -> Result<()> {
+        let indexers = indexers
+            .iter()
+            .map(|i| i.lock().expect("indexer mutex poisoned"))
+            .collect::<Vec<_>>();
         let mut wtxn = self.env.write_txn()?;
 
         self.slots.clear(&mut wtxn)?;
         self.volatile_block.clear(&mut wtxn)?;
         self.volatile_tx.clear(&mut wtxn)?;
-        indexer.clear(&mut wtxn)?;
+        for indexer in indexers.iter() {
+            indexer.clear(&mut wtxn)?;
+        }
 
         wtxn.commit()?;
         self.env.resize()

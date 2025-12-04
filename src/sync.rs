@@ -1,4 +1,3 @@
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -10,7 +9,7 @@ use tokio::time::sleep;
 use tracing::info;
 
 use crate::db::Db;
-use crate::indexer::Indexer;
+use crate::indexer::IndexerList;
 use crate::writer::Writer;
 
 const BLOCKFETCH_CONCURRENCY: usize = 200;
@@ -30,11 +29,7 @@ pub struct Sync {
 }
 
 impl Sync {
-    pub async fn new(
-        mut node: PeerClient,
-        db: &Db,
-        indexer: &Arc<Mutex<impl Indexer + Send + 'static>>,
-    ) -> Result<Self> {
+    pub async fn new(mut node: PeerClient, db: &Db, indexer: &IndexerList) -> Result<Self> {
         let tip = db.tip()?;
         match db.tip()? {
             Point::Origin => {

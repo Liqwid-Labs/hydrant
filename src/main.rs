@@ -6,12 +6,10 @@ use tokio::signal;
 use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 
-mod codec;
 mod db;
-mod env;
 mod indexer;
+mod primitives;
 mod sync;
-mod tx;
 mod writer;
 
 use db::Db;
@@ -50,7 +48,7 @@ async fn main() -> Result<()> {
 
     // Listen for chain-sync events until shutdown or error
     info!("Starting sync...");
-    let mut sync = Sync::new(node, &db, &indexer).await?;
+    let mut sync = Sync::new(node, &db, &vec![indexer]).await?;
     let sync_result = tokio::select! {
         res = sync.run() => res,
         res = shutdown_signal() => {
