@@ -7,7 +7,9 @@ use pallas::network::miniprotocols::Point;
 use tracing::info;
 
 use crate::indexer::IndexerList;
-use crate::primitives::{BlockHash, DatumHash, Tx, TxHash, VolatileBlock};
+use crate::primitives::{
+    BlockHash, DatumHash, Tx, TxHash, TxOutput, TxOutputPointer, VolatileBlock,
+};
 
 mod codec;
 mod env;
@@ -19,9 +21,9 @@ pub use env::Env;
 pub struct Db {
     pub max_rollback_blocks: usize,
     pub env: Env,
-    pub slots: Database<U64<BigEndian>, RkyvCodec<BlockHash>>,
-    pub volatile_tx: Database<RkyvCodec<TxHash>, RkyvCodec<Tx>>,
-    pub volatile_block: Database<RkyvCodec<BlockHash>, RkyvCodec<VolatileBlock>>,
+    slots: Database<U64<BigEndian>, RkyvCodec<BlockHash>>,
+    volatile_tx: Database<RkyvCodec<TxHash>, RkyvCodec<Tx>>,
+    volatile_block: Database<RkyvCodec<BlockHash>, RkyvCodec<VolatileBlock>>,
 }
 
 impl Db {
@@ -55,6 +57,46 @@ impl Db {
         })
     }
 
+    pub fn get_volatile_block(
+        &self,
+        rtxn: &heed::RoTxn,
+        block_hash: &BlockHash,
+    ) -> Result<Option<VolatileBlock>> {
+        self.volatile_block
+            .get(rtxn, block_hash)?
+            .map(|res| {
+                Ok(rkyv::deserialize::<VolatileBlock, rkyv::rancor::Error>(
+                    res,
+                )?)
+            })
+            .transpose()
+    }
+
+    pub fn get_volatile_tx(&self, rtxn: &heed::RoTxn, tx_hash: &TxHash) -> Result<Option<Tx>> {
+        self.volatile_tx
+            .get(rtxn, tx_hash)?
+            .map(|res| Ok(rkyv::deserialize::<Tx, rkyv::rancor::Error>(res)?))
+            .transpose()
+    }
+
+    pub fn get_volatile_tx_output(
+        &self,
+        rtxn: &heed::RoTxn,
+        pointer: &TxOutputPointer,
+    ) -> Result<Option<TxOutput>> {
+        self.volatile_tx
+            .get(rtxn, &pointer.hash)?
+            .map(|res| rkyv::deserialize::<Tx, rkyv::rancor::Error>(res))
+            .transpose()?
+            .map(|tx| {
+                tx.outputs
+                    .get(pointer.index as usize)
+                    .cloned()
+                    .context("missing output")
+            })
+            .transpose()
+    }
+
     pub fn tip(&self) -> Result<Point> {
         let rtxn = self.env.read_txn()?;
         if let Some((slot, block_hash)) = self.slots.rev_range(&rtxn, &(0..))?.next().transpose()? {
@@ -79,7 +121,7 @@ impl Db {
             let (tx, datums) = Tx::parse(raw_tx);
 
             let did_insert_tx = indexers.iter().try_fold(false, |acc, i| {
-                i.insert_tx(&mut wtxn, &tx).map(|b| acc || b)
+                i.insert_tx(&self, &mut wtxn, &tx).map(|b| acc || b)
             })?;
             if did_insert_tx {
                 tx_hashes.push(tx.hash.clone());
@@ -88,7 +130,7 @@ impl Db {
 
             for (datum_hash, datum) in datums.iter() {
                 let did_insert_datum = indexers.iter().try_fold(false, |acc, i| {
-                    i.insert_datum(&mut wtxn, datum_hash, datum)
+                    i.insert_datum(&self, &mut wtxn, datum_hash, datum)
                         .map(|b| acc || b)
                 })?;
                 if did_insert_datum {
@@ -109,6 +151,7 @@ impl Db {
     }
 
     pub fn roll_backward(&self, indexers: &IndexerList, point: &Point) -> Result<()> {
+        // TODO: error when rolling back too far
         let slot = match point {
             Point::Origin => return self.clear(indexers),
             Point::Specific(slot, _) => *slot + 1,
@@ -141,13 +184,13 @@ impl Db {
                     .context("missing tx")?;
                 let tx = rkyv::deserialize::<Tx, rkyv::rancor::Error>(tx)?;
                 for indexer in indexers.iter() {
-                    indexer.delete_tx(&mut wtxn, &tx)?;
+                    indexer.delete_tx(&self, &mut wtxn, &tx)?;
                 }
             }
             for datum_hash in block.datums.iter().rev() {
                 let datum_hash = rkyv::deserialize::<DatumHash, rkyv::rancor::Error>(datum_hash)?;
                 for indexer in indexers.iter() {
-                    indexer.delete_datum(&mut wtxn, &datum_hash)?;
+                    indexer.delete_datum(&self, &mut wtxn, &datum_hash)?;
                 }
             }
 
@@ -170,10 +213,20 @@ impl Db {
         {
             let (_, block_hash) = slot?;
             let block_hash = rkyv::deserialize::<BlockHash, rkyv::rancor::Error>(block_hash)?;
-            let exists = self.volatile_block.delete(&mut wtxn, &block_hash)?;
-            if !exists {
+
+            // If we can't find the block, we've already trimmed it
+            let Some(block) = self.volatile_block.get(&rtxn, &block_hash)? else {
                 break;
+            };
+            let block = rkyv::deserialize::<VolatileBlock, rkyv::rancor::Error>(block)?;
+
+            // Drop all the txs in the block
+            for tx_hash in block.txs.iter().rev() {
+                self.volatile_tx.delete(&mut wtxn, tx_hash)?;
             }
+
+            // Drop the block
+            self.volatile_block.delete(&mut wtxn, &block_hash)?;
         }
 
         Ok(wtxn.commit()?)

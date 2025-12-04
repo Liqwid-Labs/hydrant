@@ -6,9 +6,41 @@ use super::*;
 pub type Policy = Hash<28>;
 pub type AssetName = Vec<u8>;
 
-#[derive(Clone, Debug, Archive, Deserialize, Serialize)]
+#[derive(Clone, Debug, Archive, Deserialize, Serialize, PartialEq)]
 #[rkyv(compare(PartialEq))]
-pub struct AssetPointer(pub Policy, pub AssetName);
+pub struct AssetId {
+    pub policy: Policy,
+    pub name: Option<AssetName>,
+}
+
+impl AssetId {
+    pub fn new(policy: Policy, name: Option<AssetName>) -> Self {
+        Self { policy, name }
+    }
+}
+
+impl PartialEq<Asset> for AssetId {
+    fn eq(&self, other: &Asset) -> bool {
+        self.policy == other.policy && self.name.as_ref().is_none_or(|name| name == &other.name)
+    }
+}
+
+impl From<Asset> for AssetId {
+    fn from(asset: Asset) -> Self {
+        Self {
+            policy: asset.policy,
+            name: Some(asset.name),
+        }
+    }
+}
+impl From<&Asset> for AssetId {
+    fn from(asset: &Asset) -> Self {
+        Self {
+            policy: asset.policy.clone(),
+            name: Some(asset.name.clone()),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Archive, Deserialize, Serialize)]
 #[rkyv(compare(PartialEq))]

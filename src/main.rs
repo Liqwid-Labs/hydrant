@@ -13,11 +13,18 @@ mod sync;
 mod writer;
 
 use db::Db;
-use indexer::oracle::OracleIndexer;
 use sync::Sync;
+
+use crate::indexer::utxo::UtxoIndexerBuilder;
+use crate::primitives::{AssetId, Hash, Policy};
 
 const NODE_HOST: &str = "localhost:3001";
 const MAGIC: u64 = 764824073; // mainnet
+
+const POLICY_ID: Policy = Hash([
+    0x0f, 0xde, 0x77, 0xa0, 0xea, 0x08, 0x33, 0x50, 0x2b, 0x38, 0x6d, 0x34, 0xe3, 0x3d, 0x78, 0xf8,
+    0x6c, 0x75, 0x4b, 0xad, 0x30, 0x9e, 0xe8, 0xbf, 0x00, 0x8d, 0x7a, 0x9d,
+]);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -28,16 +35,16 @@ async fn main() -> Result<()> {
     info!(version = env!("CARGO_PKG_VERSION"), "Starting...");
 
     let db = Db::new("./db/hydrant", 2160)?;
-    let indexer = Arc::new(Mutex::new(OracleIndexer::new(&db.env)?));
+    let indexer = UtxoIndexerBuilder::new()
+        .asset(AssetId::new(POLICY_ID, None))
+        .build(&db.env)?;
+    let indexer = Arc::new(Mutex::new(indexer));
 
-    // Example logging Oracle UTxOs
+    // Example logging UTxOs
     {
         let indexer = indexer.lock().unwrap();
-        for (tx_pointer, utxo) in indexer.utxos()?.iter() {
-            println!("{}", hex::encode(*tx_pointer.hash));
-            if let Some(datum_hash) = &utxo.datum_hash {
-                println!("{:?}", indexer.datum(datum_hash)?);
-            }
+        for (txo_pointer, _) in indexer.utxos()?.iter() {
+            println!("{}", hex::encode(*txo_pointer.hash));
         }
     };
 

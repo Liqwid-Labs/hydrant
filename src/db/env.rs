@@ -26,13 +26,31 @@ impl Env {
     pub fn create_database<KC, DC>(
         &self,
         wtxn: &mut heed::RwTxn,
-        name: Option<&str>,
+        name: &str,
     ) -> heed::Result<Database<KC, DC>>
     where
         KC: 'static,
         DC: 'static,
     {
-        self.env.create_database(wtxn, name)
+        self.env.create_database(wtxn, Some(name))
+    }
+
+    pub fn create_database_with_flags<KC, DC>(
+        &self,
+        wtxn: &mut heed::RwTxn,
+        name: &str,
+        flags: heed::DatabaseFlags,
+    ) -> heed::Result<Database<KC, DC>>
+    where
+        KC: 'static,
+        DC: 'static,
+    {
+        self.env
+            .database_options()
+            .types::<KC, DC>()
+            .name(name)
+            .flags(flags)
+            .create(wtxn)
     }
 
     pub fn write_txn(&self) -> heed::Result<RwTxn<'_>> {

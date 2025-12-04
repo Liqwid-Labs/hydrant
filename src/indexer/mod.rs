@@ -2,35 +2,26 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 
-use crate::primitives::{Block, Datum, DatumHash, Script, ScriptHash, Tx};
+use crate::db::Db;
+use crate::primitives::{Datum, DatumHash, Script, ScriptHash, Tx};
 
-pub mod oracle;
+pub mod utxo;
 
 #[allow(dead_code)]
 pub trait Indexer {
-    fn id(&self) -> String;
-
     #[allow(unused_variables)]
-    fn insert_block(&self, wtxn: &mut heed::RwTxn, block: &Block) -> Result<bool> {
-        Ok(true)
-    }
-    #[allow(unused_variables)]
-    fn delete_block(&self, wtxn: &mut heed::RwTxn, block: &Block) -> Result<()> {
-        Ok(())
-    }
-
-    #[allow(unused_variables)]
-    fn insert_tx(&self, wtxn: &mut heed::RwTxn, tx: &Tx) -> Result<bool> {
+    fn insert_tx(&self, db: &Db, wtxn: &mut heed::RwTxn, tx: &Tx) -> Result<bool> {
         Ok(false)
     }
     #[allow(unused_variables)]
-    fn delete_tx(&self, wtxn: &mut heed::RwTxn, tx: &Tx) -> Result<()> {
+    fn delete_tx(&self, db: &Db, wtxn: &mut heed::RwTxn, tx: &Tx) -> Result<()> {
         Ok(())
     }
 
     #[allow(unused_variables)]
     fn insert_datum(
         &self,
+        db: &Db,
         wtxn: &mut heed::RwTxn,
         hash: &DatumHash,
         datum: &Datum,
@@ -38,13 +29,14 @@ pub trait Indexer {
         Ok(false)
     }
     #[allow(unused_variables)]
-    fn delete_datum(&self, wtxn: &mut heed::RwTxn, hash: &DatumHash) -> Result<()> {
+    fn delete_datum(&self, db: &Db, wtxn: &mut heed::RwTxn, hash: &DatumHash) -> Result<()> {
         Ok(())
     }
 
     #[allow(unused_variables)]
     fn insert_script(
         &self,
+        db: &Db,
         wtxn: &mut heed::RwTxn,
         hash: &ScriptHash,
         script: &Script,
@@ -52,7 +44,7 @@ pub trait Indexer {
         Ok(false)
     }
     #[allow(unused_variables)]
-    fn delete_script(&self, wtxn: &mut heed::RwTxn, hash: &ScriptHash) -> Result<()> {
+    fn delete_script(&self, db: &Db, wtxn: &mut heed::RwTxn, hash: &ScriptHash) -> Result<()> {
         Ok(())
     }
 
