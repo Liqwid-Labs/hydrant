@@ -21,6 +21,8 @@ pub use env::Env;
 pub struct Db {
     pub max_rollback_blocks: usize,
     pub env: Env,
+
+    // big endian ints are lexicographically ordered
     slots: Database<U64<BigEndian>, RkyvCodec<BlockHash>>,
     volatile_tx: Database<RkyvCodec<TxHash>, RkyvCodec<Tx>>,
     volatile_block: Database<RkyvCodec<BlockHash>, RkyvCodec<VolatileBlock>>,
@@ -107,7 +109,7 @@ impl Db {
         }
     }
 
-    pub fn roll_forward(&self, indexers: &IndexerList, block: &MultiEraBlock) -> Result<()> {
+    pub(crate) fn roll_forward(&self, indexers: &IndexerList, block: &MultiEraBlock) -> Result<()> {
         let indexers = indexers
             .iter()
             .map(|i| i.lock().expect("indexer mutex poisoned"))
@@ -150,7 +152,7 @@ impl Db {
         self.env.resize()
     }
 
-    pub fn roll_backward(&self, indexers: &IndexerList, point: &Point) -> Result<()> {
+    pub(crate) fn roll_backward(&self, indexers: &IndexerList, point: &Point) -> Result<()> {
         // TODO: error when rolling back too far
         let slot = match point {
             Point::Origin => return self.clear(indexers),
@@ -202,7 +204,7 @@ impl Db {
         self.env.resize()
     }
 
-    pub fn trim_volatile(&self) -> Result<()> {
+    pub(crate) fn trim_volatile(&self) -> Result<()> {
         let rtxn = self.env.read_txn()?;
         let mut wtxn = self.env.write_txn()?;
 
@@ -232,7 +234,7 @@ impl Db {
         Ok(wtxn.commit()?)
     }
 
-    pub fn clear(&self, indexers: &IndexerList) -> Result<()> {
+    pub(crate) fn clear(&self, indexers: &IndexerList) -> Result<()> {
         let indexers = indexers
             .iter()
             .map(|i| i.lock().expect("indexer mutex poisoned"))

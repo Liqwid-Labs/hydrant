@@ -4,7 +4,7 @@ use anyhow::{Context, ensure};
 use heed::{Database, WithTls};
 use tracing::debug;
 
-/// Wrapper around LMDB to provide safe resizing of the database
+/// Wrapper around LMDB to provide safe resizing and snapshotting of the database
 #[derive(Debug, Clone)]
 pub struct Env {
     env: heed::Env<WithTls>,
@@ -67,7 +67,7 @@ impl Env {
         self.env.force_sync()
     }
 
-    pub fn resize(&self) -> anyhow::Result<()> {
+    pub(crate) fn resize(&self) -> anyhow::Result<()> {
         let info = self.env.info();
 
         let used_size = self.page_size * info.last_page_number;

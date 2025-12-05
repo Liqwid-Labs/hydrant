@@ -1,23 +1,15 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use hydrant::primitives::{AssetId, Hash, Policy};
+use hydrant::{Db, Sync, UtxoIndexerBuilder};
 use pallas::network::facades::PeerClient;
 use tokio::signal;
 use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 
-mod db;
-mod indexer;
-mod primitives;
-mod sync;
-mod writer;
-
-use db::Db;
-use sync::Sync;
-
-use crate::indexer::utxo::UtxoIndexerBuilder;
-use crate::primitives::{AssetId, Hash, Policy};
-
+const MAX_ROLLBACK_BLOCKS: usize = 2160;
+const DB_PATH: &str = "../db/hydrant";
 const NODE_HOST: &str = "localhost:3001";
 const MAGIC: u64 = 764824073; // mainnet
 
@@ -34,7 +26,7 @@ async fn main() -> Result<()> {
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
     info!(version = env!("CARGO_PKG_VERSION"), "Starting...");
 
-    let db = Db::new("./db/hydrant", 2160)?;
+    let db = Db::new(DB_PATH, MAX_ROLLBACK_BLOCKS)?;
     let indexer = UtxoIndexerBuilder::new()
         .asset(AssetId::new(POLICY_ID, None))
         .build(&db.env)?;
