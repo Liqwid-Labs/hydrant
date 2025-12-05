@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
     info!(version = env!("CARGO_PKG_VERSION"), "Starting...");
 
     let db = Db::new(DB_PATH, MAX_ROLLBACK_BLOCKS)?;
-    let indexer = UtxoIndexerBuilder::new()
+    let indexer = UtxoIndexerBuilder::new("utxo")
         .asset(AssetId::new(POLICY_ID, None))
         .build(&db.env)?;
     let indexer = Arc::new(Mutex::new(indexer));

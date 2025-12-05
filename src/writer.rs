@@ -45,7 +45,7 @@ impl Writer {
     }
 
     pub async fn send(&self, event: SyncEvent) -> Result<()> {
-        self.tx.send(event).await.context("Writer channel closed")?;
+        self.tx.send(event).await.context("writer channel closed")?;
         Ok(())
     }
 
@@ -74,12 +74,10 @@ impl Writer {
                     db.trim_volatile()?;
                     db.persist()?;
 
-                    let sync_progress = block.slot() as f64 / tip_slot as f64 * 100.;
                     tracing::info!(
                         block = block.number(),
                         slot = block.slot(),
                         slots_to_tip = tip_slot.saturating_sub(block.slot()),
-                        sync_progress = format!("{sync_progress:.2}%"),
                         buffer_usage = format!("{buffer_usage:.2}%"),
                         "RollForward"
                     );
