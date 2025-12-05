@@ -6,13 +6,15 @@ use crate::indexer::Indexer;
 use crate::primitives::{Address, AssetId, Tx, TxOutput, TxOutputPointer};
 
 pub struct UtxoIndexerBuilder {
+    id: String,
     addresses: Option<Vec<Address>>,
     assets: Option<Vec<AssetId>>,
 }
 
 impl UtxoIndexerBuilder {
-    pub fn new() -> Self {
+    pub fn new(id: &str) -> Self {
         Self {
+            id: id.to_string(),
             addresses: None,
             assets: None,
         }
@@ -41,12 +43,13 @@ impl UtxoIndexerBuilder {
     }
 
     pub fn build(self, env: &Env) -> Result<UtxoIndexer> {
-        UtxoIndexer::new(env, self.addresses, self.assets)
+        UtxoIndexer::new(&self.id, env, self.addresses, self.assets)
     }
 }
 
 #[derive(Clone)]
 pub struct UtxoIndexer {
+    id: String,
     env: Env,
     utxos: Database<RkyvCodec<TxOutputPointer>, RkyvCodec<TxOutput>>,
     by_address: Database<RkyvCodec<Address>, RkyvCodec<TxOutputPointer>>,
@@ -57,6 +60,7 @@ pub struct UtxoIndexer {
 
 impl UtxoIndexer {
     pub fn new(
+        id: &str,
         env: &Env,
         addresses: Option<Vec<Address>>,
         assets: Option<Vec<AssetId>>,
@@ -72,6 +76,7 @@ impl UtxoIndexer {
         wtxn.commit()?;
 
         Ok(Self {
+            id: id.to_string(),
             env,
             utxos,
             by_address,
@@ -141,6 +146,10 @@ impl UtxoIndexer {
 }
 
 impl Indexer for UtxoIndexer {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
     fn insert_tx(&self, _: &Db, wtxn: &mut RwTxn, tx: &Tx) -> anyhow::Result<bool> {
         let mut added_some = false;
 

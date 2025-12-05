@@ -8,6 +8,8 @@ use crate::primitives::{Datum, DatumHash, Script, ScriptHash, Tx};
 pub mod utxo;
 
 pub trait Indexer {
+    fn id(&self) -> &str;
+
     #[allow(unused_variables)]
     fn insert_tx(&self, db: &Db, wtxn: &mut heed::RwTxn, tx: &Tx) -> Result<bool> {
         Ok(false)

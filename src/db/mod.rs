@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use heed::byteorder::BigEndian;
-use heed::types::U64;
+use heed::types::{Str, U64, Unit};
 use heed::{Database, EnvOpenOptions};
 use pallas::ledger::traverse::MultiEraBlock;
 use pallas::network::miniprotocols::Point;
@@ -26,6 +26,7 @@ pub struct Db {
     slots: Database<U64<BigEndian>, RkyvCodec<BlockHash>>,
     volatile_tx: Database<RkyvCodec<TxHash>, RkyvCodec<Tx>>,
     volatile_block: Database<RkyvCodec<BlockHash>, RkyvCodec<VolatileBlock>>,
+    indexer_ids: Database<Str, Unit>,
 }
 
 impl Db {
@@ -48,6 +49,7 @@ impl Db {
         let slots = env.create_database(&mut wtxn, Some("slots"))?;
         let volatile_tx = env.create_database(&mut wtxn, Some("volatile_tx"))?;
         let volatile_block = env.create_database(&mut wtxn, Some("volatile_block"))?;
+        let indexer_ids = env.create_database(&mut wtxn, Some("indexer_ids"))?;
         wtxn.commit()?;
 
         Ok(Self {
@@ -56,6 +58,7 @@ impl Db {
             slots,
             volatile_tx,
             volatile_block,
+            indexer_ids,
         })
     }
 
@@ -88,7 +91,7 @@ impl Db {
     ) -> Result<Option<TxOutput>> {
         self.volatile_tx
             .get(rtxn, &pointer.hash)?
-            .map(|res| rkyv::deserialize::<Tx, rkyv::rancor::Error>(res))
+            .map(rkyv::deserialize::<Tx, rkyv::rancor::Error>)
             .transpose()?
             .map(|tx| {
                 tx.outputs
@@ -97,6 +100,34 @@ impl Db {
                     .context("missing output")
             })
             .transpose()
+    }
+
+    pub fn assert_or_insert_indexer_ids(
+        &self,
+        wtxn: &mut heed::RwTxn,
+        indexer_ids: &[&str],
+    ) -> Result<()> {
+        if indexer_ids.is_empty() {
+            for id in indexer_ids.iter() {
+                self.indexer_ids.put(wtxn, id, &())?;
+            }
+            Ok(())
+        } else {
+            self.assert_indexer_ids(wtxn, indexer_ids)
+        }
+    }
+
+    pub fn assert_indexer_ids(&self, rtxn: &heed::RoTxn, indexer_ids: &[&str]) -> Result<()> {
+        let expected_indexer_ids = self
+            .indexer_ids
+            .iter(rtxn)?
+            .map(|res| -> Result<String> { Ok(res?.0.to_string()) })
+            .collect::<Result<Vec<_>>>()?;
+        anyhow::ensure!(
+            expected_indexer_ids.as_slice() == indexer_ids,
+            "indexer ids don't match. expected: {expected_indexer_ids:?}, got: {indexer_ids:?}"
+        );
+        Ok(())
     }
 
     pub fn tip(&self) -> Result<Point> {
@@ -116,6 +147,10 @@ impl Db {
             .collect::<Vec<_>>();
         let mut wtxn = self.env.write_txn()?;
 
+        // Ensure the indexers didn't change
+        let indexer_ids = indexers.iter().map(|i| i.id()).collect::<Vec<_>>();
+        self.assert_or_insert_indexer_ids(&mut wtxn, &indexer_ids)?;
+
         // Pass datums + txs to each indexer, storing the hashes of those that got inserted
         let mut tx_hashes = vec![];
         let mut datum_hashes = vec![];
@@ -123,7 +158,7 @@ impl Db {
             let (tx, datums) = Tx::parse(raw_tx);
 
             let did_insert_tx = indexers.iter().try_fold(false, |acc, i| {
-                i.insert_tx(&self, &mut wtxn, &tx).map(|b| acc || b)
+                i.insert_tx(self, &mut wtxn, &tx).map(|b| acc || b)
             })?;
             if did_insert_tx {
                 tx_hashes.push(tx.hash.clone());
@@ -132,7 +167,7 @@ impl Db {
 
             for (datum_hash, datum) in datums.iter() {
                 let did_insert_datum = indexers.iter().try_fold(false, |acc, i| {
-                    i.insert_datum(&self, &mut wtxn, datum_hash, datum)
+                    i.insert_datum(self, &mut wtxn, datum_hash, datum)
                         .map(|b| acc || b)
                 })?;
                 if did_insert_datum {
@@ -149,7 +184,7 @@ impl Db {
         self.slots.put(&mut wtxn, &block.slot, &block.hash)?;
 
         wtxn.commit()?;
-        self.env.resize()
+        Ok(self.env.resize()?)
     }
 
     pub(crate) fn roll_backward(&self, indexers: &IndexerList, point: &Point) -> Result<()> {
@@ -164,6 +199,11 @@ impl Db {
             .map(|i| i.lock().expect("indexer mutex poisoned"))
             .collect::<Vec<_>>();
         let rtxn = self.env.read_txn()?;
+
+        // Ensure the indexers didn't change
+        let indexer_ids = indexers.iter().map(|i| i.id()).collect::<Vec<_>>();
+        self.assert_indexer_ids(&rtxn, &indexer_ids)?;
+
         for res in self.slots.rev_range(&rtxn, &(slot..))? {
             let (slot, block_hash) = res?;
             let block_hash = rkyv::deserialize::<BlockHash, rkyv::rancor::Error>(block_hash)?;
@@ -172,7 +212,7 @@ impl Db {
                 .volatile_block
                 .get(&rtxn, &block_hash)?
                 .with_context(|| {
-                    format!("Block not found, the db could be corrupted: {}", block_hash)
+                    format!("block not found while rolling back, the db could be corrupt or rolled back further than max_rollback_blocks: {}", block_hash)
                 })?;
 
             // NOTE: reverse order because a tx may spend outputs from a previous tx
@@ -180,19 +220,21 @@ impl Db {
             let mut wtxn = self.env.write_txn()?;
             for tx_hash in block.txs.iter().rev() {
                 let tx_hash = rkyv::deserialize::<TxHash, rkyv::rancor::Error>(tx_hash)?;
-                let tx = self
-                    .volatile_tx
-                    .get(&rtxn, &tx_hash)?
-                    .context("missing tx")?;
+                let tx = self.volatile_tx.get(&rtxn, &tx_hash)?.with_context(|| {
+                    format!(
+                        "tx not found while rolling back, the db could be corrupt: {}",
+                        tx_hash
+                    )
+                })?;
                 let tx = rkyv::deserialize::<Tx, rkyv::rancor::Error>(tx)?;
                 for indexer in indexers.iter() {
-                    indexer.delete_tx(&self, &mut wtxn, &tx)?;
+                    indexer.delete_tx(self, &mut wtxn, &tx)?;
                 }
             }
             for datum_hash in block.datums.iter().rev() {
                 let datum_hash = rkyv::deserialize::<DatumHash, rkyv::rancor::Error>(datum_hash)?;
                 for indexer in indexers.iter() {
-                    indexer.delete_datum(&self, &mut wtxn, &datum_hash)?;
+                    indexer.delete_datum(self, &mut wtxn, &datum_hash)?;
                 }
             }
 
@@ -201,7 +243,7 @@ impl Db {
             wtxn.commit()?;
         }
 
-        self.env.resize()
+        Ok(self.env.resize()?)
     }
 
     pub(crate) fn trim_volatile(&self) -> Result<()> {
@@ -244,20 +286,21 @@ impl Db {
         self.slots.clear(&mut wtxn)?;
         self.volatile_block.clear(&mut wtxn)?;
         self.volatile_tx.clear(&mut wtxn)?;
+        self.indexer_ids.clear(&mut wtxn)?;
         for indexer in indexers.iter() {
             indexer.clear(&mut wtxn)?;
         }
 
         wtxn.commit()?;
-        self.env.resize()
+        Ok(self.env.resize()?)
     }
 
     pub fn persist(&self) -> Result<()> {
-        Ok(self.env.force_sync()?)
+        Ok(self.env.persist()?)
     }
 
     pub fn snapshot(&self, path: impl AsRef<std::path::Path>, overwrite: bool) -> Result<()> {
-        self.env.snapshot(path, overwrite)
+        Ok(self.env.snapshot(path, overwrite)?)
     }
 }
 
