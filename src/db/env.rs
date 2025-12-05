@@ -96,6 +96,26 @@ impl Env {
 
         Ok(())
     }
+
+    pub(crate) fn snapshot(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        overwrite: bool,
+    ) -> anyhow::Result<()> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = if overwrite {
+            std::fs::File::create(path)
+        } else {
+            std::fs::File::create_new(path)
+        }?;
+
+        Ok(self
+            .env
+            .copy_to_file(&mut file, heed::CompactionOption::Enabled)?)
+    }
 }
 
 pub struct RoTxn<'env> {

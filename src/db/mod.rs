@@ -255,6 +255,10 @@ impl Db {
     pub fn persist(&self) -> Result<()> {
         Ok(self.env.force_sync()?)
     }
+
+    pub fn snapshot(&self, path: impl AsRef<std::path::Path>, overwrite: bool) -> Result<()> {
+        self.env.snapshot(path, overwrite)
+    }
 }
 
 #[cfg(test)]
