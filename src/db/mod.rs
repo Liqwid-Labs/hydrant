@@ -102,22 +102,21 @@ impl Db {
             .transpose()
     }
 
-    pub fn assert_or_insert_indexer_ids(
-        &self,
-        wtxn: &mut heed::RwTxn,
-        indexer_ids: &[&str],
-    ) -> Result<()> {
-        if indexer_ids.is_empty() {
-            for id in indexer_ids.iter() {
-                self.indexer_ids.put(wtxn, id, &())?;
-            }
-            Ok(())
-        } else {
-            self.assert_indexer_ids(wtxn, indexer_ids)
-        }
-    }
-
     pub fn assert_indexer_ids(&self, rtxn: &heed::RoTxn, indexer_ids: &[&str]) -> Result<()> {
+        // Insert indexer ids if they don't exist
+        if self.indexer_ids.len(rtxn)? == 0 {
+            let mut wtxn = self.env.write_txn()?;
+            for id in indexer_ids.iter() {
+                self.indexer_ids.put(&mut wtxn, id, &())?;
+            }
+            if indexer_ids.is_empty() {
+                self.indexer_ids.put(&mut wtxn, "empty", &())?;
+            }
+            wtxn.commit()?;
+            return Ok(());
+        }
+
+        // Check indexer ids
         let expected_indexer_ids = self
             .indexer_ids
             .iter(rtxn)?
@@ -149,7 +148,7 @@ impl Db {
 
         // Ensure the indexers didn't change
         let indexer_ids = indexers.iter().map(|i| i.id()).collect::<Vec<_>>();
-        self.assert_or_insert_indexer_ids(&mut wtxn, &indexer_ids)?;
+        self.assert_indexer_ids(&wtxn, &indexer_ids)?;
 
         // Pass datums + txs to each indexer, storing the hashes of those that got inserted
         let mut tx_hashes = vec![];
