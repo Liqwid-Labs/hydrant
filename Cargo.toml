@@ -14,6 +14,7 @@ path = "src/lib.rs"
 [dependencies]
 tokio = { version = "1.48.0", features = ["rt", "sync"] }
 anyhow = "1.0.100"
+thiserror = "2.0.17"
 tracing = "0.1.41"
 
 # database
