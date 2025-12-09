@@ -102,33 +102,6 @@ impl Db {
             .transpose()
     }
 
-    pub fn assert_indexer_ids(&self, rtxn: &heed::RoTxn, indexer_ids: &[&str]) -> Result<()> {
-        // Insert indexer ids if they don't exist
-        if self.indexer_ids.len(rtxn)? == 0 {
-            let mut wtxn = self.env.write_txn()?;
-            for id in indexer_ids.iter() {
-                self.indexer_ids.put(&mut wtxn, id, &())?;
-            }
-            if indexer_ids.is_empty() {
-                self.indexer_ids.put(&mut wtxn, "empty", &())?;
-            }
-            wtxn.commit()?;
-            return Ok(());
-        }
-
-        // Check indexer ids
-        let expected_indexer_ids = self
-            .indexer_ids
-            .iter(rtxn)?
-            .map(|res| -> Result<String> { Ok(res?.0.to_string()) })
-            .collect::<Result<Vec<_>>>()?;
-        anyhow::ensure!(
-            expected_indexer_ids.as_slice() == indexer_ids,
-            "indexer ids don't match. expected: {expected_indexer_ids:?}, got: {indexer_ids:?}"
-        );
-        Ok(())
-    }
-
     pub fn tip(&self) -> Result<Point> {
         let rtxn = self.env.read_txn()?;
         if let Some((slot, block_hash)) = self.slots.rev_range(&rtxn, &(0..))?.next().transpose()? {
@@ -138,6 +111,17 @@ impl Db {
             Ok(Point::Origin)
         }
     }
+
+    pub fn persist(&self) -> Result<()> {
+        Ok(self.env.persist()?)
+    }
+
+    pub fn snapshot(&self, path: impl AsRef<std::path::Path>, overwrite: bool) -> Result<()> {
+        Ok(self.env.snapshot(path, overwrite)?)
+    }
+
+    // -------------
+    // Internal API
 
     pub(crate) fn roll_forward(&self, indexers: &IndexerList, block: &MultiEraBlock) -> Result<()> {
         let indexers = indexers
@@ -294,12 +278,35 @@ impl Db {
         Ok(self.env.resize()?)
     }
 
-    pub fn persist(&self) -> Result<()> {
-        Ok(self.env.persist()?)
-    }
+    pub(crate) fn assert_indexer_ids(
+        &self,
+        rtxn: &heed::RoTxn,
+        indexer_ids: &[&str],
+    ) -> Result<()> {
+        // Insert indexer ids if they don't exist
+        if self.indexer_ids.len(rtxn)? == 0 {
+            let mut wtxn = self.env.write_txn()?;
+            for id in indexer_ids.iter() {
+                self.indexer_ids.put(&mut wtxn, id, &())?;
+            }
+            if indexer_ids.is_empty() {
+                self.indexer_ids.put(&mut wtxn, "empty", &())?;
+            }
+            wtxn.commit()?;
+            return Ok(());
+        }
 
-    pub fn snapshot(&self, path: impl AsRef<std::path::Path>, overwrite: bool) -> Result<()> {
-        Ok(self.env.snapshot(path, overwrite)?)
+        // Check indexer ids
+        let expected_indexer_ids = self
+            .indexer_ids
+            .iter(rtxn)?
+            .map(|res| -> Result<_> { Ok(res?.0) })
+            .collect::<Result<Vec<_>>>()?;
+        anyhow::ensure!(
+            expected_indexer_ids == indexer_ids,
+            "indexer ids don't match. expected: {expected_indexer_ids:?}, got: {indexer_ids:?}"
+        );
+        Ok(())
     }
 }
 
