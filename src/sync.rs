@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use pallas::ledger::traverse::MultiEraHeader;
 use pallas::network::facades::PeerClient;
 use pallas::network::miniprotocols::Point;
-use pallas::network::miniprotocols::chainsync::{NextResponse, Tip};
+use pallas::network::miniprotocols::chainsync::{HeaderContent, NextResponse, Tip};
 use tokio::time::sleep;
 use tracing::info;
 
@@ -55,7 +55,7 @@ impl Sync {
         })
     }
 
-    pub async fn next(&mut self) -> Result<()> {
+    pub async fn next(&mut self) -> Result<NextResponse<HeaderContent>> {
         let next = {
             let chainsync = self.node.chainsync();
             match chainsync.has_agency() {
@@ -65,33 +65,46 @@ impl Sync {
         };
 
         match next {
-            NextResponse::RollForward(header, tip) => {
+            NextResponse::RollForward(ref header, ref tip) => {
                 let subtag = header.byron_prefix.map(|(subtag, _)| subtag);
                 let header = MultiEraHeader::decode(header.variant, subtag, &header.cbor)?;
                 let point = Point::Specific(header.slot(), header.hash().to_vec());
                 let is_at_tip = point == tip.0;
 
-                self.pending_fetches.push((point, tip));
+                self.pending_fetches.push((point, tip.clone()));
                 if self.pending_fetches.len() >= BLOCKFETCH_CONCURRENCY || is_at_tip {
                     self.flush_pending_fetches().await?;
                 }
             }
-            NextResponse::RollBackward(point, _) => {
+            NextResponse::RollBackward(ref point, _) => {
                 self.flush_pending_fetches().await?;
-                self.writer.send(SyncEvent::RollBackward(point)).await?;
+                self.writer
+                    .send(SyncEvent::RollBackward(point.clone()))
+                    .await?;
             }
             NextResponse::Await => {
                 self.flush_pending_fetches().await?;
-                sleep(Duration::from_millis(10)).await;
             }
         };
 
-        Ok(())
+        Ok(next)
     }
 
     pub async fn run(&mut self) -> Result<()> {
         loop {
-            self.next().await?
+            let next = self.next().await?;
+            if matches!(next, NextResponse::Await) {
+                sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+
+    pub async fn run_until_synced(&mut self) -> Result<()> {
+        loop {
+            if matches!(self.next().await?, NextResponse::Await) {
+                self.writer.wait_until_flushed().await?;
+                return Ok(());
+            }
         }
     }
 

@@ -49,6 +49,14 @@ impl Writer {
         Ok(())
     }
 
+    pub async fn wait_until_flushed(&self) -> Result<()> {
+        // spin until all pending events have been flushed
+        while self.tx.strong_count() > 0 {
+            tokio::time::sleep(tokio::time::Duration::from_micros(10)).await;
+        }
+        Ok(())
+    }
+
     pub async fn stop(self) -> Result<()> {
         drop(self.tx);
         if let Err(e) = self.shutdown_tx.send(()).await {
