@@ -128,11 +128,13 @@ impl Db {
             .iter()
             .map(|i| i.lock().expect("indexer mutex poisoned"))
             .collect::<Vec<_>>();
+        {
+            let rtxn = self.env.read_txn()?;
+            // Ensure the indexers didn't change
+            let indexer_ids = indexers.iter().map(|i| i.id()).collect::<Vec<_>>();
+            self.assert_indexer_ids(&rtxn, &indexer_ids)?;
+        }
         let mut wtxn = self.env.write_txn()?;
-
-        // Ensure the indexers didn't change
-        let indexer_ids = indexers.iter().map(|i| i.id()).collect::<Vec<_>>();
-        self.assert_indexer_ids(&wtxn, &indexer_ids)?;
 
         // Pass datums + txs to each indexer, storing the hashes of those that got inserted
         let mut tx_hashes = vec![];
