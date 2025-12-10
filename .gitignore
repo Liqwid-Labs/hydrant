@@ -2,3 +2,6 @@
 /examples/target
 /result
 /db
+
+.envrc
+.direnv/
