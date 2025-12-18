@@ -1,7 +1,9 @@
 use std::ops::RangeInclusive;
 
-use pallas::ledger::primitives::conway::PseudoDatumOption;
-use pallas::ledger::traverse::{ComputeHash, MultiEraInput, MultiEraOutput};
+use pallas::ledger::{
+    primitives::conway::DatumOption,
+    traverse::{ComputeHash, MultiEraInput, MultiEraOutput},
+};
 use rkyv::{Archive, Deserialize, Serialize};
 
 use super::*;
@@ -27,16 +29,14 @@ impl TxOutput {
         let assets = Asset::from_assets(output.value().assets());
         let datum_hash = output.datum().map(|d| {
             match d {
-                PseudoDatumOption::Hash(x) => x,
-                PseudoDatumOption::Data(data) => data.compute_hash(),
+                DatumOption::Hash(x) => x,
+                DatumOption::Data(data) => data.compute_hash(),
             }
             .into()
         });
         let datum = output.datum().and_then(|d| match d {
-            PseudoDatumOption::Hash(_) => None,
-            PseudoDatumOption::Data(data) => {
-                Some((data.compute_hash().into(), data.raw_cbor().to_vec()))
-            }
+            DatumOption::Hash(_) => None,
+            DatumOption::Data(data) => Some((data.compute_hash().into(), data.raw_cbor().to_vec())),
         });
 
         (

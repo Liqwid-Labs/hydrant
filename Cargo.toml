@@ -23,6 +23,8 @@ rkyv = "0.8.12"
 page_size = "0.6.0"
 
 # cardano
-pallas = "0.33"
+pallas = { git = "https://github.com/liqwid-labs/pallas", branch = "txbuilder-pub", features = [
+    "unstable",
+] }
 hex = "0.4.3"
 minicbor = "2.1.3"
